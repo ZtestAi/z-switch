@@ -113,6 +113,8 @@
 
 ## 使用指南
 
+> 📖 完整使用教程见 **[docs/USAGE.md](./docs/USAGE.md)**（安装、添加供应商、切换、本地路由代理、FAQ 等）。下面是精简流程。
+
 <details>
 <summary><strong>展开完整流程</strong></summary>
 

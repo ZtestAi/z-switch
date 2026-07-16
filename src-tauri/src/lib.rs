@@ -242,8 +242,7 @@ fn open_backups_folder() -> Result<(), String> {
 /// 使用系统默认浏览器打开版本可追踪的使用帮助。
 #[tauri::command]
 fn open_help_document() -> Result<(), String> {
-    const HELP_URL: &str =
-        "https://github.com/qingzo/z-switch/blob/master/z-switch/README.md#使用帮助";
+    const HELP_URL: &str = "https://github.com/ZtestAi/z-switch/blob/master/docs/USAGE.md";
 
     #[cfg(target_os = "windows")]
     let result = std::process::Command::new("explorer.exe")
