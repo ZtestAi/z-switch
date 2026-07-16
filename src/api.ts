@@ -113,9 +113,13 @@ export const setAutoLaunch = (enabled: boolean) =>
 export interface ProxyStatus {
   enabled: boolean;
   port: number;
+  /** 本地活跃度计数：仅事件次数，不碰请求内容、不上传 */
+  inFlight: number;
+  total: number;
+  lastActivityMs: number;
 }
 
-/** 查询本地热切换代理是否在跑 + 端口 */
+/** 查询本地热切换代理是否在跑 + 端口 + 本地活跃度计数 */
 export const proxyStatus = () => invoke<ProxyStatus>("proxy_status");
 
 /** 开启/关闭本地热切换代理（开=起服务并把 live 指向 localhost；关=恢复直连） */

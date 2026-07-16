@@ -7,6 +7,7 @@ import {
   DEFAULT_CODEX_WIRE_API,
   inferWireApi,
   inferClaudeKeyField,
+  needsV1Suffix,
 } from "./providerFactory";
 import {
   AlertIcon,
@@ -184,6 +185,7 @@ export default function ProviderModal({ app, initial, existingIds, onClose, onSa
   const [connMsg, setConnMsg] = useState<string | null>(null);
   const [speed, setSpeed] = useState<{ ms?: number; loading?: boolean; err?: boolean }>({});
   const [inferHint, setInferHint] = useState<string | null>(null);
+  const [v1Hint, setV1Hint] = useState(false);
 
   // baseUrl 变化时的智能推断（填一个补一片）：不打断用户，仅在能判断时静默修正 + 给提示
   function onBaseUrlChange(v: string) {
@@ -198,17 +200,26 @@ export default function ProviderModal({ app, initial, existingIds, onClose, onSa
       if (w && w !== wireApi) {
         setWireApi(w);
         setInferHint(`已按厂商自动选择 wire_api=${w}`);
-        return;
+      } else {
+        setInferHint(null);
       }
-    } else {
-      const kf = inferClaudeKeyField(v);
-      if (kf && kf !== keyField) {
-        setKeyField(kf);
-        setInferHint(`地址含 /anthropic，已自动选 ${kf}`);
-        return;
-      }
+      setV1Hint(needsV1Suffix(v)); // Codex 疑似缺 /v1 → 非阻断提醒
+      return;
+    }
+    setV1Hint(false);
+    const kf = inferClaudeKeyField(v);
+    if (kf && kf !== keyField) {
+      setKeyField(kf);
+      setInferHint(`地址含 /anthropic，已自动选 ${kf}`);
+      return;
     }
     setInferHint(null);
+  }
+
+  // 一键补全 /v1 后缀
+  function applyV1Suffix() {
+    setBaseUrl(baseUrl.replace(/\/+$/, "") + "/v1");
+    setV1Hint(false);
   }
 
   async function doTestConn() {
@@ -405,6 +416,13 @@ export default function ProviderModal({ app, initial, existingIds, onClose, onSa
                 </label>
                 <input className="mono" value={baseUrl} onChange={(e) => onBaseUrlChange(e.target.value)} placeholder="https://…" />
                 {inferHint && <div className="hint inline-hint" style={{ color: "var(--accent-text)" }}><CheckIcon />{inferHint}</div>}
+                {v1Hint && (
+                  <div className="hint inline-hint" style={{ color: "var(--warning)" }}>
+                    <AlertIcon />
+                    Codex 供应商地址通常需以 /v1 结尾
+                    <button type="button" className="hint-action" onClick={applyV1Suffix}>点此补全</button>
+                  </div>
+                )}
               </div>
 
               {app === "claude" ? (

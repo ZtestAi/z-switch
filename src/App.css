@@ -167,8 +167,12 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .tools { display: flex; align-items: center; gap: 6px; }
 
 /* 测速 chip */
-.lat { font-family: var(--mono); font-size: var(--text-sm); font-weight: 700; display: inline-flex; align-items: center; gap: 5px; min-width: 58px; justify-content: flex-end; }
+.lat { font-family: var(--mono); font-size: var(--text-sm); font-weight: 700; display: inline-flex; align-items: center; gap: 6px; min-width: 66px; justify-content: flex-end; }
 .lat .pulse { width: 6px; height: 6px; border-radius: 50%; }
+/* 信号条式延迟：3 根柱子，按档位点亮 */
+.lat .bar { display: inline-flex; gap: 2px; align-items: flex-end; height: 12px; }
+.lat .bar i { width: 3px; border-radius: 1px; background: currentColor; opacity: .3; }
+.lat .bar i.on { opacity: 1; }
 .lat.good { color: var(--success); } .lat.good .pulse { background: var(--success); }
 .lat.mid { color: hsl(38 80% 40%); } .lat.mid .pulse { background: hsl(38 88% 50%); }
 .lat.slow { color: var(--danger); } .lat.slow .pulse { background: var(--danger); }
@@ -219,6 +223,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .field textarea { resize: vertical; min-height: 150px; line-height: 1.55; }
 .field .hint { font-size: var(--text-sm); color: var(--fg-muted); margin-top: 5px; line-height: 1.45; }
 .inline-hint { display: flex; align-items: center; gap: 4px; }
+.hint-action { margin-left: 2px; padding: 0; border: none; background: none; font-family: var(--sans); font-size: var(--text-sm); font-weight: 800; color: var(--accent-text); text-decoration: underline; cursor: pointer; }
+.hint-action:hover { color: var(--accent-hover); }
 .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
 .seg-mini { display: inline-flex; background: var(--input-bg); border: 1px solid var(--border-light); border-radius: var(--r); padding: 3px; }
 .seg-mini button { min-height: 26px; font-family: var(--mono); font-size: var(--text-sm); font-weight: 700; color: var(--fg-muted); border: none; background: none; padding: 0 11px; border-radius: var(--r-sm); cursor: pointer; }
@@ -399,6 +405,20 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .toast.error .ic { background: var(--danger); }
 .toast.info .ic { background: var(--fg-muted); }
 @keyframes toast-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
+
+/* 底部状态栏（主界面）：路由开关 + 本地活跃度 */
+.statusbar { flex: none; height: 34px; display: flex; align-items: center; gap: 16px; padding: 0 14px; border-top: 1px solid var(--border-light); background: var(--bg-soft); font-family: var(--mono); font-size: var(--text-sm); color: var(--fg-muted); }
+.statusbar .si { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.statusbar .si b { color: var(--fg-sec); font-weight: 700; }
+.statusbar .sb-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.statusbar .sb-dot.on { background: var(--success); box-shadow: 0 0 0 3px hsl(155 62% 42% / .18); }
+.statusbar .sb-dot.on.live { animation: sb-live-pulse 1.4s ease-in-out infinite; }
+.statusbar .sb-dot.off { background: hsl(200 14% 62%); }
+.statusbar .sb-current { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.statusbar .sb-right { margin-left: auto; display: flex; align-items: center; gap: 10px; flex: none; }
+.statusbar .sb-route { display: inline-flex; align-items: center; gap: 7px; font-family: var(--sans); font-size: var(--text-label); font-weight: 700; color: var(--fg-sec); cursor: pointer; user-select: none; }
+.statusbar .sb-route.busy { opacity: .5; pointer-events: none; }
+@keyframes sb-live-pulse { 50% { opacity: .35; } }
 
 /* 高级选项 */
 .adv-toggle { min-height: 28px; font-family: var(--sans); font-size: var(--text-label); font-weight: 700; color: var(--accent-text); background: none; border: none; cursor: pointer; padding: 0; display: inline-flex; align-items: center; gap: 4px; }

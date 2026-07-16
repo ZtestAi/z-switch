@@ -338,20 +338,28 @@ fn set_proxy_enabled_flag(root: &mut Root, enabled: bool) {
     }
 }
 
-/// 代理状态（前端查询用）。
+/// 代理状态（前端查询用）。in_flight/total/last_activity_ms 为本地活跃度计数，
+/// 仅事件次数、不碰请求内容、不出本机。
 #[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ProxyStatus {
     enabled: bool,
     port: u16,
+    in_flight: u32,
+    total: u64,
+    last_activity_ms: u64,
 }
 
-/// 查询代理是否在跑 + 端口。
+/// 查询代理是否在跑 + 端口 + 本地活跃度计数。
 #[tauri::command]
 fn proxy_status(app_handle: AppHandle) -> ProxyStatus {
     let handle = app_handle.state::<proxy::ProxyHandle>();
     ProxyStatus {
         enabled: handle.is_running(),
         port: handle.current_port(),
+        in_flight: handle.in_flight(),
+        total: handle.total(),
+        last_activity_ms: handle.last_activity_ms(),
     }
 }
 

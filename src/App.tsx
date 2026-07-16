@@ -12,8 +12,11 @@ import {
   originalConfigStatus,
   openHelpDocument,
   restoreOriginal,
+  proxyStatus,
+  setProxyEnabled,
   type ActiveDeleteMode,
   type OriginalConfigStatus,
+  type ProxyStatus,
 } from "./api";
 import ProviderModal from "./ProviderModal";
 import SettingsModal from "./SettingsModal";
@@ -114,6 +117,20 @@ function latText(l?: Lat): string {
   if (l.ms != null) return `${l.ms}ms`;
   return "未测";
 }
+// 信号条点亮数：good=3 / mid=2 / slow=1 / 其它=0
+function latBars(l?: Lat): number {
+  switch (latClass(l)) {
+    case "good":
+      return 3;
+    case "mid":
+      return 2;
+    case "slow":
+      return 1;
+    default:
+      return 0;
+  }
+}
+const BAR_HEIGHTS = [5, 8, 12];
 
 export default function App() {
   const [root, setRoot] = useState<Root | null>(null);
@@ -130,6 +147,11 @@ export default function App() {
   const [updateInfo, setUpdateInfo] = useState<Update | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
   const [updateProgress, setUpdateProgress] = useState<number | null>(null);
+  const [proxy, setProxy] = useState<ProxyStatus | null>(null);
+  const [proxyBusy, setProxyBusy] = useState(false);
+  const [proxyRate, setProxyRate] = useState(0); // 估算「次/分」，仅体感提示
+  const [nowTs, setNowTs] = useState(0);
+  const rateSampleRef = useRef<{ total: number; ts: number } | null>(null);
   const [confirm, setConfirm] = useState<null | {
     title?: string;
     message: string;
@@ -158,6 +180,61 @@ export default function App() {
       .then((update) => setUpdateInfo(update))
       .catch(() => {});
   }, []);
+
+  // 轮询代理状态 + 本地活跃度（2s）：驱动底部状态栏，与设置页共用同一后端句柄。
+  useEffect(() => {
+    let alive = true;
+    async function poll() {
+      try {
+        const st = await proxyStatus();
+        if (!alive) return;
+        const now = Date.now();
+        const prev = rateSampleRef.current;
+        if (prev && st.total >= prev.total && now > prev.ts) {
+          const rpm = ((st.total - prev.total) / ((now - prev.ts) / 1000)) * 60;
+          // 指数平滑，避免单请求造成的尖峰抖动
+          setProxyRate((r) => Math.round(r * 0.5 + rpm * 0.5));
+        } else if (prev && st.total < prev.total) {
+          setProxyRate(0); // 代理重启，频率基线重置
+        }
+        rateSampleRef.current = { total: st.total, ts: now };
+        setProxy(st);
+        setNowTs(now);
+      } catch {
+        /* 忽略：代理未起或命令暂不可用 */
+      }
+    }
+    poll();
+    const id = setInterval(poll, 2000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, []);
+
+  // 底部「一键路由」：复用设置页 toggleProxy 逻辑（开=起服务指向 localhost；关=恢复直连）。
+  function toggleRouting() {
+    if (proxyBusy || !proxy) return;
+    const next = !proxy.enabled;
+    const port = proxy.port;
+    setProxyBusy(true);
+    setProxy((p) => (p ? { ...p, enabled: next } : p)); // 乐观更新
+    setProxyEnabled(next)
+      .then((r) => {
+        setRoot(r);
+        pushToast(
+          "success",
+          next
+            ? `本地路由已开启（127.0.0.1:${port}）· 切换供应商无需重启客户端`
+            : "本地路由已关闭，已恢复直连",
+        );
+      })
+      .catch((e) => {
+        setProxy((p) => (p ? { ...p, enabled: !next } : p)); // 失败回滚
+        pushToast("error", "切换本地路由失败：" + String(e));
+      })
+      .finally(() => setProxyBusy(false));
+  }
 
   // 设置页「检查更新」手动触发：无更新时给一次成功提示。
   async function handleCheckUpdate() {
@@ -471,6 +548,20 @@ export default function App() {
 
   const existingIds = data ? Object.keys(data.providers) : [];
 
+  // 底部状态栏派生值
+  const proxyOn = proxy?.enabled ?? false;
+  const proxyPort = proxy?.port ?? 8899;
+  const idleSec =
+    proxy && proxy.lastActivityMs > 0
+      ? Math.max(0, Math.floor((nowTs - proxy.lastActivityMs) / 1000))
+      : null;
+  const proxyActive = proxyOn && ((proxy?.inFlight ?? 0) > 0 || (idleSec != null && idleSec < 10));
+  const currentName = data?.current ? data.providers[data.current]?.name ?? null : null;
+  const activeSegments: string[] = [];
+  if ((proxy?.inFlight ?? 0) > 0) activeSegments.push(`${proxy!.inFlight} 进行中`);
+  if (proxyRate >= 1) activeSegments.push(`~${proxyRate} 次/分`);
+  activeSegments.push("活跃");
+
   return (
     <div className="app">
       <Titlebar />
@@ -568,7 +659,11 @@ export default function App() {
                   <span className="local-account-state"><span className="pulse" />本机登录</span>
                 ) : (
                   <span className={"lat " + latClass(l)}>
-                    <span className="pulse" />
+                    <span className="bar">
+                      {BAR_HEIGHTS.map((h, i) => (
+                        <i key={i} className={i < latBars(l) ? "on" : ""} style={{ height: h }} />
+                      ))}
+                    </span>
                     {latText(l)}
                   </span>
                 )}
@@ -611,6 +706,41 @@ export default function App() {
             </div>
           );
         })}
+      </div>
+
+      <div className="statusbar">
+        {proxyOn ? (
+          <>
+            <span className="si">
+              <span className={"sb-dot on" + (proxyActive ? " live" : "")} />
+              代理 <b>ON</b> · 127.0.0.1:{proxyPort}
+            </span>
+            <span className="si">
+              {proxyActive
+                ? activeSegments.join(" · ")
+                : `空闲${idleSec != null ? ` ${idleSec}s` : ""}`}
+            </span>
+          </>
+        ) : (
+          <span className="si">
+            <span className="sb-dot off" />
+            直连模式 · 切换供应商需重启客户端
+          </span>
+        )}
+        <div className="sb-right">
+          {currentName && <span className="si sb-current">生效 · {currentName}</span>}
+          <label className={"sb-route" + (proxyBusy ? " busy" : "")}>
+            一键路由
+            <button
+              type="button"
+              className={"switch" + (proxyOn ? " on" : "")}
+              role="switch"
+              aria-checked={proxyOn}
+              aria-label="一键开启本地路由"
+              onClick={toggleRouting}
+            />
+          </label>
+        </div>
       </div>
 
       {streamModal && (

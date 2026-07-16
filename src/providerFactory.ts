@@ -53,6 +53,25 @@ export function inferWireApi(baseUrl: string): "responses" | "chat" | null {
   return null;
 }
 
+/**
+ * Codex base URL 疑似缺少 /v1 版本后缀时返回 true（仅用于非阻断提醒）。
+ * 已含任意版本段（/v1、/v2、/api/v3 等）或还不是合法 http(s) 地址时不提醒。
+ */
+export function needsV1Suffix(baseUrl: string): boolean {
+  const raw = baseUrl.trim();
+  if (!raw) return false;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return false; // 还没输完整地址，不打扰
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+  if (!url.hostname) return false;
+  if (/\/v\d+(\/|$)/.test(url.pathname)) return false; // 已有版本段
+  return true;
+}
+
 export function inferClaudeKeyField(
   baseUrl: string,
 ): "ANTHROPIC_AUTH_TOKEN" | "ANTHROPIC_API_KEY" | null {

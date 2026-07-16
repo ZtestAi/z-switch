@@ -6,9 +6,11 @@
 //! （覆盖客户端携带的任意 key）。切换供应商时只改内存里的 target → 客户端不知道、
 //! 无需重启。
 //!
-//! 纪律：不改 body、不做格式转换、不碰 key 内容、不统计、不上传。纯本地邮差。
+//! 纪律：不改 body、不做格式转换、不碰 key 内容、不上传。纯本地邮差。
+//! 唯一的例外是「本地活跃度计数」：只统计**事件次数**（在途请求数 / 累计转发数 /
+//! 最后活跃时间），用于界面显示「正在使用」。绝不触碰请求体或 key，绝不出本机。
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -148,6 +150,10 @@ pub struct ProxyHandle {
     pub targets: SharedTargets,
     pub running: Arc<AtomicBool>,
     pub port: Arc<std::sync::atomic::AtomicU16>,
+    /// 本地活跃度计数（仅事件次数，不碰内容、不上传）。
+    pub in_flight: Arc<AtomicU32>,
+    pub total: Arc<AtomicU64>,
+    pub last_activity_ms: Arc<AtomicU64>,
 }
 
 impl Default for ProxyHandle {
@@ -156,6 +162,9 @@ impl Default for ProxyHandle {
             targets: Arc::new(RwLock::new(ProxyTargets::default())),
             running: Arc::new(AtomicBool::new(false)),
             port: Arc::new(std::sync::atomic::AtomicU16::new(DEFAULT_PORT)),
+            in_flight: Arc::new(AtomicU32::new(0)),
+            total: Arc::new(AtomicU64::new(0)),
+            last_activity_ms: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -167,6 +176,21 @@ impl ProxyHandle {
     pub fn current_port(&self) -> u16 {
         self.port.load(Ordering::SeqCst)
     }
+    pub fn in_flight(&self) -> u32 {
+        self.in_flight.load(Ordering::Relaxed)
+    }
+    pub fn total(&self) -> u64 {
+        self.total.load(Ordering::Relaxed)
+    }
+    pub fn last_activity_ms(&self) -> u64 {
+        self.last_activity_ms.load(Ordering::Relaxed)
+    }
+    /// 起新会话时清零累计计数（在途归零、频率从 0 起算）。
+    pub fn reset_counters(&self) {
+        self.in_flight.store(0, Ordering::Relaxed);
+        self.total.store(0, Ordering::Relaxed);
+        self.last_activity_ms.store(0, Ordering::Relaxed);
+    }
 }
 
 /// 传给 handler 的运行期依赖。
@@ -175,6 +199,26 @@ struct Runtime {
     targets: SharedTargets,
     config: ProxyRuntimeConfig,
     error_log_lock: tokio::sync::Mutex<()>,
+    /// 本地活跃度计数句柄（与 managed ProxyHandle 共享同一 Arc）。
+    in_flight: Arc<AtomicU32>,
+    total: Arc<AtomicU64>,
+    last_activity_ms: Arc<AtomicU64>,
+}
+
+/// RAII 守卫：进入 handler 时 in_flight+1，离开（任何路径：正常/错误/超时/流中断）时 -1。
+struct InFlightGuard(Arc<AtomicU32>);
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 /// 代理生命周期控制器，存进 ProxyState（async 锁保护起停）。
@@ -207,11 +251,16 @@ impl ProxyControl {
             .tcp_keepalive(config.tcp_keepalive)
             .build()
             .map_err(|e| format!("构建代理 HTTP 客户端失败：{e}"))?;
+        // 新会话：活跃度计数从 0 起算。
+        self.handle.reset_counters();
         let runtime = Arc::new(Runtime {
             client,
             targets: self.handle.targets.clone(),
             config,
             error_log_lock: tokio::sync::Mutex::new(()),
+            in_flight: self.handle.in_flight.clone(),
+            total: self.handle.total.clone(),
+            last_activity_ms: self.handle.last_activity_ms.clone(),
         });
 
         let app = Router::new()
@@ -324,6 +373,13 @@ async fn forward(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, (StatusCode, String)> {
+    // 本地活跃度计数：进入 handler 即 +1 并记活跃时间；guard 在函数/流结束时 -1。
+    // 只数事件，不读 body、不看 key。
+    rt.total.fetch_add(1, Ordering::Relaxed);
+    rt.last_activity_ms.store(now_ms(), Ordering::Relaxed);
+    rt.in_flight.fetch_add(1, Ordering::Relaxed);
+    let in_flight_guard = InFlightGuard(rt.in_flight.clone());
+
     // 路径形如 /claude/v1/messages → app=claude, rest=/v1/messages
     let path = uri.path();
     let trimmed = path.trim_start_matches('/');
@@ -491,9 +547,10 @@ async fn forward(
     let idle_timeout = rt.config.streaming_idle_timeout;
     let non_streaming_timeout = rt.config.non_streaming_timeout;
     let upstream_stream = Box::pin(upstream.bytes_stream());
+    // in_flight_guard 随流状态一路传递：流真正结束（正常/错误/超时）时才 drop → in_flight-1。
     let stream = futures_util::stream::unfold(
-        (upstream_stream, true, false, Vec::<u8>::new()),
-        move |(mut upstream_stream, first_chunk, finished, mut capture)| {
+        (upstream_stream, true, false, Vec::<u8>::new(), in_flight_guard),
+        move |(mut upstream_stream, first_chunk, finished, mut capture, guard)| {
             let rt = stream_rt.clone();
             let app = stream_app.clone();
             let url = stream_url.clone();
@@ -517,7 +574,7 @@ async fn forward(
                             let remaining = ERROR_BODY_CAPTURE_BYTES - capture.len();
                             capture.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
                         }
-                        Some((Ok(bytes), (upstream_stream, false, false, capture)))
+                        Some((Ok(bytes), (upstream_stream, false, false, capture, guard)))
                     }
                     Ok(Some(Err(error))) => {
                         let detail = safe_error_detail(
@@ -537,7 +594,7 @@ async fn forward(
                         .await;
                         Some((
                             Err(std::io::Error::other(detail)),
-                            (upstream_stream, false, true, capture),
+                            (upstream_stream, false, true, capture, guard),
                         ))
                     }
                     Ok(None) => {
@@ -579,7 +636,7 @@ async fn forward(
                         .await;
                         Some((
                             Err(std::io::Error::new(std::io::ErrorKind::TimedOut, detail)),
-                            (upstream_stream, false, true, capture),
+                            (upstream_stream, false, true, capture, guard),
                         ))
                     }
                 }
