@@ -1,0 +1,29 @@
+[package]
+name = "z-switch"
+version = "0.1.0"
+description = "z-switch · 开源无广告的 Claude Code / Codex 供应商一键切换工具（由 真测 Ztest 出品）"
+authors = ["ztest.ai"]
+edition = "2021"
+
+[lib]
+name = "z_switch_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-window-state = "2"
+tauri-plugin-deep-link = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+dirs = "5"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+axum = "0.8"
+tokio = { version = "1", features = ["net", "rt", "sync"] }
+futures-util = "0.3"
+
+[target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+tauri-plugin-autostart = "2"
