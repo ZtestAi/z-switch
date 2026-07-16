@@ -63,10 +63,11 @@
 | --- | --- |
 | **供应商管理** | Claude Code / Codex 分区管理、一键切换；自定义供应商的添加、复制、编辑、删除；表单与 JSON 两种编辑方式 |
 | **开箱即用** | 内置 Claude / OpenAI 官方账号卡片，可与任意 API 中转站来回切换；首次启动自动保留并导入已有的 `~/.claude` / `~/.codex` 配置 |
-| **多档模型** | Claude 支持主模型与 Haiku / Sonnet / Opus / Fable 四档独立配置；Codex 可选 `responses` 或 `chat` 协议 |
-| **供应商体检** | Base URL 智能推断、连通性测试、模型列表拉取、TCP 测速，以及发送最小流式 `Hi` 的**真实调用测试**（显示首字耗时与总耗时） |
+| **多档模型** | Claude 支持主模型与 Haiku / Sonnet / Opus / Fable 四档独立配置，Sonnet / Opus / Fable 可勾选 **1M 长上下文**；Codex 可选 `responses` 或 `chat` 协议 |
+| **供应商体检** | Base URL 智能推断、连通性测试、模型列表拉取、**HTTP 层测速**，以及发送最小流式 `Hi` 的**真实调用测试**（显示首字耗时与总耗时） |
+| **Claude 生态联动** | 切换可同步到 **Claude 桌面版**（独立聊天 App，写 3p 网关配置）与 **VS Code Claude Code 扩展**；可选跳过 Claude Code 初次安装确认；一键打开 Claude / Codex / z-switch 配置目录 |
 | **配置安全** | 独立原始快照、一键恢复、原子写入、写前备份、Codex 双文件回滚、切换前 backfill，避免手工改动丢失 |
-| **系统集成** | 系统托盘、单实例、窗口状态记忆、开机自启、深链 `zswitch://import`；关闭 / Alt+F4 最小化到托盘，托盘菜单「退出」才结束进程 |
+| **系统集成** | 系统托盘、单实例、窗口状态记忆、开机自启、深链 `zswitch://import`（带确认弹窗、防覆盖）；关闭 / Alt+F4 最小化到托盘，托盘菜单「退出」才结束进程 |
 | **外观** | 浅色 / 深色 / 跟随系统主题 |
 | **本地代理（实验）** | `localhost` 转发请求与流式响应，运行期间热切换目标，附超时 / 连接池 / 请求体上限 / 脱敏错误日志 |
 
@@ -160,15 +161,29 @@
 
 > **已知限制**：当前不会同步改写开启代理时已落入 live 配置的模型名和 Codex `wire_api`。因此热切换只适用于模型 / 协议兼容的供应商；跨模型或跨协议切换仍需关闭代理后直连切换。该模式仍需用真实供应商持续验证路径、鉴权头和流式响应兼容性。
 
+### Claude 生态联动（可选开关）
+
+除了 Claude Code CLI（`~/.claude/settings.json`），设置页可开启让切换同步到 Claude 的其它入口，均为「跟随当前 Claude 供应商」，官方账号 / 恢复原始时自动撤回：
+
+- **Claude 桌面版（独立聊天 App，仅 macOS / Windows）** — 写桌面版 **3p 网关配置**：本地路由开着时网关指向 `…/claude`（复用代理，随热切换跟随），关着时直连供应商地址。**需重启桌面 App 才读取新配置**；未安装桌面 App 时该开关不产生任何写入。
+- **VS Code Claude Code 扩展** — 扩展有独立鉴权门槛，仅改 `settings.json` 不认；开启后写 `~/.claude/config.json` 的 `primaryApiKey`（官方账号时清除），让扩展随第三方供应商生效。
+- **跳过 Claude Code 初次安装确认** — 向 `~/.claude.json` 写 `hasCompletedOnboarding`，跳过首次运行引导。
+
+> 以上均**只做单字段增量读改写**，保留文件里的其它内容，绝不整体覆盖；任一同步失败只记日志，不影响供应商切换本身。
+
 ---
 
 ## 数据与文件位置
 
 | 路径 | 内容 |
 | --- | --- |
-| `~/.claude/settings.json` | Claude Code 客户端配置（直连模式写入 `env`） |
+| `~/.claude/settings.json` | Claude Code CLI 配置（直连模式写入 `env`） |
+| `~/.claude/config.json` | VS Code Claude Code 扩展配置（`primaryApiKey`，开启联动时写入） |
+| `~/.claude.json` | Claude Code 根配置（`hasCompletedOnboarding`，开启「跳过初次确认」时写入） |
+| `%LOCALAPPDATA%\Claude`、`Claude-3p`（mac 为 `~/Library/Application Support/…`） | Claude 桌面版配置（开启「桌面版随切换」时写 3p 网关 profile） |
 | `~/.codex/auth.json`、`~/.codex/config.toml` | Codex 客户端配置（直连模式写入） |
 | `~/.z-switch/original/` | 首次运行保存的**原始配置快照**，可随时恢复 |
+| `~/.z-switch/backups/` | 每次写入前的时间戳备份 |
 | `~/.z-switch/logs/proxy-errors.jsonl` | 本地代理的脱敏错误日志（按大小轮转） |
 
 ---
@@ -232,9 +247,10 @@ src-tauri/src/              后端（Rust + Tauri 2）
   store.rs                  providers.json 数据模型
   live.rs                   Claude/Codex live 配置读写
   proxy.rs                  本地代理和热切换目标
-  connectivity.rs           HTTP 连通性检查
+  claude_ext.rs             VS Code 扩展放行 + 跳过初次确认
+  claude_desktop.rs         Claude 桌面版 3p 网关配置写盘
+  connectivity.rs           HTTP 连通性检查与测速
   model_fetch.rs            模型列表拉取
-  speed.rs                  TCP 测速
   tray.rs                   系统托盘
 ```
 

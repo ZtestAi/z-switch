@@ -43,3 +43,12 @@
 - [x] 新增 MIT `LICENSE`，保留 cc-switch 原始版权声明并致谢
 - [x] 新增完整使用教程 `docs/USAGE.md`，修复应用内「文档」按钮地址
 - [x] 配置 GitHub Actions 三平台发布流水线，发布首个版本 **v0.1.0**
+- [x] 测速改为 **HTTP 层**探测（弃用纯 TCP，规避 TUN / 透明代理就地应答的「<1ms」失真）
+- [x] 修复：恢复 Codex 后切第三方（开路由）不触发第三方请求（`current=None` 也走写 localhost 分支）
+- [x] Claude **1M 长上下文**：Sonnet / Opus / Fable 可勾选，模型名追加 `[1M]` 标记
+- [x] **应用到 Claude Code 插件**（VS Code 扩展 `~/.claude/config.json` 的 `primaryApiKey`）
+- [x] **跳过 Claude Code 初次安装确认**（`~/.claude.json` 的 `hasCompletedOnboarding`）
+- [x] 设置页**配置目录**快捷入口（打开 `~/.claude` / `~/.codex` / `~/.z-switch`）
+- [x] **浏览器一键添加供应商**：`zswitch://import` 深链加固（确认弹窗 + http(s) 校验 + 密钥脱敏 + 同名不覆盖），附 `docs/DEEPLINK.md` 规范与 `docs/deeplink.html` 生成页
+- [x] **Claude 桌面版随切换生效**（独立聊天 App，写 3p 网关 profile；代理跟随 / 直连两模式；仅 macOS/Windows，未装 App 时 no-op；schema 已用真机 dump 核对） — *待真机验证激活*
+- [x] 同步更新 README / USAGE 文档至以上能力
