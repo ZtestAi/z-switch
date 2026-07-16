@@ -35,6 +35,11 @@ export const setClaudePluginEnabled = (enabled: boolean) =>
 export const setClaudeOnboardingSkip = (enabled: boolean) =>
   invoke<void>("set_claude_onboarding_skip", { enabled });
 
+/** 「Claude 桌面版随切换」的文件副作用：按当前 Claude 供应商 + 代理状态写/撤桌面版 3p 网关 profile。
+ *  仅 macOS/Windows 生效（其它平台后端直接成功返回）；设置持久化另走 saveSettings。 */
+export const setClaudeDesktopEnabled = (enabled: boolean) =>
+  invoke<void>("set_claude_desktop_enabled", { enabled });
+
 export const speedtest = (url: string) => invoke<number>("speedtest", { url });
 
 export const fetchModels = (baseUrl: string, apiKey: string, modelsUrl?: string) =>

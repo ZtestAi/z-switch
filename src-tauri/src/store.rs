@@ -126,6 +126,7 @@ impl Root {
                 "initialImportDone": false,
                 "applyClaudePlugin": false,
                 "skipClaudeOnboarding": false,
+                "applyClaudeDesktop": false,
                 "reliability": {
                     "proxyEnabled": false,
                     "failoverEnabled": false,

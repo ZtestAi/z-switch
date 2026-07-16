@@ -6,6 +6,7 @@ import {
   openConfigDir,
   proxyStatus,
   setAutoLaunch,
+  setClaudeDesktopEnabled,
   setClaudeOnboardingSkip,
   setClaudePluginEnabled,
   setProxyEnabled,
@@ -135,6 +136,29 @@ export default function SettingsModal({
       onSave(revertS);
       onToast?.("error", "设置「跳过初次安装确认」失败：" + String(e));
     });
+  }
+
+  // Claude 桌面版随切换：设置持久化走 onSave，文件副作用（写/撤 3p 网关 profile）走专门命令。
+  function toggleClaudeDesktop() {
+    const next = !s.applyClaudeDesktop;
+    const nextS = { ...s, applyClaudeDesktop: next };
+    setS(nextS);
+    onSave(nextS);
+    setClaudeDesktopEnabled(next)
+      .then(() => {
+        onToast?.(
+          "success",
+          next
+            ? "已开启 Claude 桌面版随切换 · 重启桌面 App 后生效"
+            : "已关闭 Claude 桌面版随切换 · 桌面版已退回官方"
+        );
+      })
+      .catch((e) => {
+        const revertS = { ...s, applyClaudeDesktop: !next };
+        setS(revertS);
+        onSave(revertS);
+        onToast?.("error", "设置「Claude 桌面版随切换」失败：" + String(e));
+      });
   }
 
   function openBackupDirectory() {
@@ -286,6 +310,19 @@ export default function SettingsModal({
                 <div className="d">向 ~/.claude.json 写入 hasCompletedOnboarding，跳过首次运行引导</div>
               </div>
               <button type="button" className={"switch" + (s.skipClaudeOnboarding ? " on" : "")} role="switch" aria-checked={!!s.skipClaudeOnboarding} aria-label="跳过 Claude Code 初次安装确认" onClick={toggleClaudeOnboarding} />
+            </div>
+          </div>
+
+          <div className="set-group">
+            <h4>Claude 桌面版（独立 App）</h4>
+            <div className="set-row">
+              <div className="set-copy">
+                <div className="l">桌面版随切换生效</div>
+                <div className="d">
+                  开启后 Claude 桌面聊天 App 跟随当前 Claude 供应商（写 3p 网关配置）：开着本地路由则随热切换，否则直连供应商地址；切回官方 / 恢复原始时退回官方。仅 macOS / Windows，<b>需重启桌面 App</b> 才认新配置。
+                </div>
+              </div>
+              <button type="button" className={"switch" + (s.applyClaudeDesktop ? " on" : "")} role="switch" aria-checked={!!s.applyClaudeDesktop} aria-label="Claude 桌面版随切换生效" onClick={toggleClaudeDesktop} />
             </div>
           </div>
 

@@ -1,4 +1,5 @@
 //! z-switch 后端入口 + Tauri 命令。
+mod claude_desktop;
 mod claude_ext;
 mod config;
 mod connectivity;
@@ -47,6 +48,37 @@ fn sync_claude_plugin_after_switch(plugin_on: bool, app: &str, target_is_officia
     }
 }
 
+/// 切换/恢复后按需让 Claude **桌面版**（独立聊天 App）跟随当前 Claude 供应商。
+/// 仅 claude 且用户开了「Claude 桌面版」开关、且平台支持（macOS/Windows）时生效。
+/// - 官方账号 → 桌面版退回 1p；
+/// - 第三方 + 代理在跑 → 网关指向本地 `/claude`（复用 claude 代理目标，纯透传）；
+/// - 第三方 + 代理关 → 网关直连供应商自己的地址。
+/// best-effort：失败只记日志，绝不阻断切换本身。
+fn sync_claude_desktop_after_switch(
+    desktop_on: bool,
+    app: &str,
+    target_is_official: bool,
+    provider: Option<&Provider>,
+    proxy_handle: Option<&proxy::ProxyHandle>,
+) {
+    if !desktop_on || app != "claude" || !claude_desktop::is_supported() {
+        return;
+    }
+    let result = if target_is_official {
+        claude_desktop::restore_official()
+    } else if proxy_handle.map(|h| h.is_running()).unwrap_or(false) {
+        let handle = proxy_handle.expect("running proxy must have a handle");
+        claude_desktop::apply_proxy(&proxy::local_base(handle.current_port(), "claude"))
+    } else if let Some(p) = provider {
+        claude_desktop::apply_direct(p)
+    } else {
+        return;
+    };
+    if let Err(e) = result {
+        eprintln!("[z-switch] 同步 Claude 桌面版失败: {e}");
+    }
+}
+
 pub(crate) fn switch_in_place(
     root: &mut Root,
     app: &str,
@@ -58,6 +90,11 @@ pub(crate) fn switch_in_place(
     let plugin_on = root
         .settings
         .get("applyClaudePlugin")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let desktop_on = root
+        .settings
+        .get("applyClaudeDesktop")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let data = root
@@ -112,6 +149,13 @@ pub(crate) fn switch_in_place(
         }
         data.current = Some(id.to_string());
         sync_claude_plugin_after_switch(plugin_on, app, target_is_official);
+        sync_claude_desktop_after_switch(
+            desktop_on,
+            app,
+            target_is_official,
+            Some(&target),
+            proxy_handle,
+        );
         return Ok(());
     }
 
@@ -126,6 +170,7 @@ pub(crate) fn switch_in_place(
     live::write_live(app, &target, backup)?;
     data.current = Some(id.to_string());
     sync_claude_plugin_after_switch(plugin_on, app, target_is_official);
+    sync_claude_desktop_after_switch(desktop_on, app, target_is_official, Some(&target), proxy_handle);
     Ok(())
 }
 
@@ -226,14 +271,20 @@ fn delete_provider(
     data.providers.remove(&id);
     data.order.retain(|x| x != &id);
     persist(&root)?;
-    // 删除当前项并「恢复原始配置」= 回到官方直连，清掉插件放行标记。
+    // 删除当前项并「恢复原始配置」= 回到官方直连，清掉插件放行标记，桌面版退回 1p。
     if is_current && active_mode.as_deref() == Some("restore") {
         let plugin_on = root
             .settings
             .get("applyClaudePlugin")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let desktop_on = root
+            .settings
+            .get("applyClaudeDesktop")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         sync_claude_plugin_after_switch(plugin_on, &app, true);
+        sync_claude_desktop_after_switch(desktop_on, &app, true, None, Some(handle.inner()));
     }
     let out = root.clone();
     drop(root);
@@ -355,13 +406,19 @@ fn restore_original(
     // “原始配置”可能本来就是用户已有的中转配置，它属于灾难恢复，
     // 不能冒充官方账号的生效状态。
     data.current = None;
-    // 恢复原始配置 = 回官方直连，清掉插件放行标记。
+    // 恢复原始配置 = 回官方直连，清掉插件放行标记，桌面版退回 1p。
     let plugin_on = root
         .settings
         .get("applyClaudePlugin")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let desktop_on = root
+        .settings
+        .get("applyClaudeDesktop")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     sync_claude_plugin_after_switch(plugin_on, &app, true);
+    sync_claude_desktop_after_switch(desktop_on, &app, true, None, Some(handle.inner()));
     persist(&root)?;
     let out = root.clone();
     drop(root);
@@ -450,7 +507,7 @@ async fn set_proxy_enabled(
 ) -> Result<Root, String> {
     let handle = app_handle.state::<proxy::ProxyHandle>();
     // 先取出需要的数据，避免把 std MutexGuard 跨 await 持有。
-    let (backup, port, runtime_config, currents) = {
+    let (backup, port, runtime_config, currents, desktop_on) = {
         let root = state.0.lock().unwrap();
         let mut cur: Vec<(String, Provider)> = Vec::new();
         for app in ["claude", "codex"] {
@@ -467,6 +524,10 @@ async fn set_proxy_enabled(
             proxy_port(&root),
             proxy::ProxyRuntimeConfig::from_settings(&root.settings),
             cur,
+            root.settings
+                .get("applyClaudeDesktop")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
         )
     };
 
@@ -499,6 +560,20 @@ async fn set_proxy_enabled(
                 continue;
             }
             live::write_live(app, provider, backup)?;
+        }
+    }
+
+    // 代理起停翻转了桌面版有效端点（localhost ↔ 直连），按新状态重写桌面版 profile。
+    if desktop_on {
+        if let Some((app, provider)) = currents.iter().find(|(app, _)| app == "claude") {
+            let is_official = store::is_official_provider(provider);
+            sync_claude_desktop_after_switch(
+                true,
+                app,
+                is_official,
+                Some(provider),
+                Some(handle.inner()),
+            );
         }
     }
 
@@ -578,6 +653,43 @@ fn set_claude_plugin_enabled(state: State<AppState>, enabled: bool) -> Result<()
 #[tauri::command]
 fn set_claude_onboarding_skip(enabled: bool) -> Result<(), String> {
     claude_ext::apply_onboarding_completed(enabled)
+}
+
+/// 「Claude 桌面版随切换」开关的**文件副作用**：按当前 Claude 供应商 + 代理状态
+/// 立即写/撤桌面版 3p 网关 profile。开→官方则退 1p、第三方按代理/直连写；关→一律退 1p。
+/// 不支持的平台（非 macOS/Windows）直接成功返回。设置本身持久化由前端 save_settings 负责。
+#[tauri::command]
+fn set_claude_desktop_enabled(
+    app_handle: AppHandle,
+    state: State<AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    if !claude_desktop::is_supported() {
+        return Ok(());
+    }
+    if !enabled {
+        return claude_desktop::restore_official();
+    }
+    // 开启：读当前 claude 供应商（锁内取值随即释放，再写文件）。
+    let provider = {
+        let root = state.0.lock().unwrap();
+        let data = root.apps.get("claude");
+        data.and_then(|d| d.current.clone())
+            .and_then(|id| data.and_then(|d| d.providers.get(&id).cloned()))
+    };
+    let Some(provider) = provider else {
+        // 无当前供应商 = 视作官方直连。
+        return claude_desktop::restore_official();
+    };
+    if store::is_official_provider(&provider) {
+        return claude_desktop::restore_official();
+    }
+    let handle = app_handle.state::<proxy::ProxyHandle>();
+    if handle.is_running() {
+        claude_desktop::apply_proxy(&proxy::local_base(handle.current_port(), "claude"))
+    } else {
+        claude_desktop::apply_direct(&provider)
+    }
 }
 
 /// 导出为格式化 JSON 字符串
@@ -857,7 +969,8 @@ pub fn run() {
             proxy_status,
             set_proxy_enabled,
             set_claude_plugin_enabled,
-            set_claude_onboarding_skip
+            set_claude_onboarding_skip,
+            set_claude_desktop_enabled
         ])
         .setup(|app| {
             // 运行时注册 zswitch:// 协议（便于未装安装包时也能测试深链）
