@@ -13,6 +13,12 @@ dist-ssr
 *.local
 demo
 
+# 签名私钥 / 密钥文件，绝不入库
+*.key
+*.key.pub
+/~/
+.tauri/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
