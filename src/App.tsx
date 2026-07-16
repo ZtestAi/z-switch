@@ -176,7 +176,8 @@ export default function App() {
         setUpdateProgress(total ? Math.round((downloaded / total) * 100) : null);
       });
     } catch (e) {
-      pushToast("error", "更新失败：" + String(e));
+      console.error("[z-switch] 更新失败:", e);
+      pushToast("error", "更新失败，请稍后重试");
       setUpdateBusy(false);
       setUpdateProgress(null);
     }

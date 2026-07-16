@@ -53,7 +53,8 @@ export default function SettingsModal({
     try {
       await onCheckUpdate();
     } catch (e) {
-      onToast?.("error", "检查更新失败：" + String(e));
+      console.error("[z-switch] 检查更新失败:", e);
+      onToast?.("error", "检查更新失败，请检查网络后重试");
     } finally {
       setCheckingUpdate(false);
     }
