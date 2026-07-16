@@ -158,10 +158,15 @@ mod tests {
     struct TestHome {
         path: PathBuf,
         previous: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
     }
 
     impl TestHome {
         fn new() -> Self {
+            // 与其它改 Z_SWITCH_TEST_HOME 的测试串行，避免并发污染 home。
+            let lock = config::TEST_HOME_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             let path = std::env::temp_dir().join(format!(
                 "z-switch-original-test-{}-{}",
                 std::process::id(),
@@ -170,7 +175,11 @@ mod tests {
             fs::create_dir_all(&path).unwrap();
             let previous = std::env::var_os("Z_SWITCH_TEST_HOME");
             std::env::set_var("Z_SWITCH_TEST_HOME", &path);
-            Self { path, previous }
+            Self {
+                path,
+                previous,
+                _lock: lock,
+            }
         }
     }
 

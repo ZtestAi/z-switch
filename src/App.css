@@ -347,6 +347,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .backup-controls { flex: none; display: flex; align-items: center; gap: 10px; }
 .folder-btn { height: var(--control-sm); padding-inline: 10px; font-size: var(--text-label); font-weight: 700; }
 .original-config-row { display: block; padding: 13px; }
+.config-dir-row { display: block; }
+.dir-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.dir-actions .folder-btn { flex: 1 1 auto; justify-content: center; }
 .original-config-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .snapshot-time { flex: none; display: inline-flex; align-items: center; gap: 5px; color: var(--fg-muted); font-family: var(--mono); font-size: var(--text-xs); line-height: 1.4; }
 .snapshot-time .ui-icon { width: 12px; height: 12px; }

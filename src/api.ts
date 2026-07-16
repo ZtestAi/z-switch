@@ -26,6 +26,15 @@ export const exportJson = () => invoke<string>("export_json");
 export const saveSettings = (settings: Record<string, unknown>) =>
   invoke<Root>("save_settings", { settings });
 
+/** 「应用到 Claude Code 插件」的文件副作用：写/删 ~/.claude/config.json 的 primaryApiKey。
+ *  设置持久化另走 saveSettings。 */
+export const setClaudePluginEnabled = (enabled: boolean) =>
+  invoke<void>("set_claude_plugin_enabled", { enabled });
+
+/** 「跳过 Claude Code 初次安装确认」的文件副作用：写/删 ~/.claude.json 的 hasCompletedOnboarding。 */
+export const setClaudeOnboardingSkip = (enabled: boolean) =>
+  invoke<void>("set_claude_onboarding_skip", { enabled });
+
 export const speedtest = (url: string) => invoke<number>("speedtest", { url });
 
 export const fetchModels = (baseUrl: string, apiKey: string, modelsUrl?: string) =>
@@ -47,6 +56,10 @@ export const originalConfigStatus = () =>
 
 /** 创建并使用系统文件管理器打开 ~/.z-switch/backups */
 export const openBackupsFolder = () => invoke<void>("open_backups_folder");
+
+/** 打开指定配置文件所在目录：claude=~/.claude、codex=~/.codex、app=~/.z-switch */
+export const openConfigDir = (kind: "claude" | "codex" | "app") =>
+  invoke<void>("open_config_dir", { kind });
 
 /** 使用系统默认浏览器打开项目使用帮助 */
 export const openHelpDocument = () => invoke<void>("open_help_document");

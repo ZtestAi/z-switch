@@ -3,8 +3,11 @@ import {
   clearProxyErrorLog,
   openBackupsFolder,
   openProxyLogFolder,
+  openConfigDir,
   proxyStatus,
   setAutoLaunch,
+  setClaudeOnboardingSkip,
+  setClaudePluginEnabled,
   setProxyEnabled,
   type OriginalConfigStatus,
 } from "./api";
@@ -106,9 +109,43 @@ export default function SettingsModal({
     });
   }
 
+  // 两个 Claude Code 增强开关：设置持久化走通用 onSave（会回写 App root，修好重开状态），
+  // 文件副作用走专门命令；乐观更新 + 失败回滚（设置与文件一并回退）。
+  function toggleClaudePlugin() {
+    const next = !s.applyClaudePlugin;
+    const nextS = { ...s, applyClaudePlugin: next };
+    setS(nextS);
+    onSave(nextS);
+    setClaudePluginEnabled(next).catch((e) => {
+      const revertS = { ...s, applyClaudePlugin: !next };
+      setS(revertS);
+      onSave(revertS);
+      onToast?.("error", "设置「应用到 Claude Code 插件」失败：" + String(e));
+    });
+  }
+
+  function toggleClaudeOnboarding() {
+    const next = !s.skipClaudeOnboarding;
+    const nextS = { ...s, skipClaudeOnboarding: next };
+    setS(nextS);
+    onSave(nextS);
+    setClaudeOnboardingSkip(next).catch((e) => {
+      const revertS = { ...s, skipClaudeOnboarding: !next };
+      setS(revertS);
+      onSave(revertS);
+      onToast?.("error", "设置「跳过初次安装确认」失败：" + String(e));
+    });
+  }
+
   function openBackupDirectory() {
     openBackupsFolder().catch((error) => {
       onToast?.("error", "打开备份文件夹失败：" + String(error));
+    });
+  }
+
+  function openDir(kind: "claude" | "codex" | "app") {
+    openConfigDir(kind).catch((error) => {
+      onToast?.("error", "打开配置目录失败：" + String(error));
     });
   }
 
@@ -230,6 +267,39 @@ export default function SettingsModal({
               <div className="original-actions">
                 <button className="btn" disabled={!originalStatus?.captured} onClick={() => onRestoreOriginal("claude")}>恢复 Claude</button>
                 <button className="btn" disabled={!originalStatus?.captured} onClick={() => onRestoreOriginal("codex")}>恢复 Codex</button>
+              </div>
+            </div>
+          </div>
+
+          <div className="set-group">
+            <h4>Claude Code 增强</h4>
+            <div className="set-row">
+              <div className="set-copy">
+                <div className="l">应用到 Claude Code 插件</div>
+                <div className="d">开启后 VS Code 的 Claude Code 扩展供应商随本软件切换（写 ~/.claude/config.json 的 primaryApiKey；官方时清除）</div>
+              </div>
+              <button type="button" className={"switch" + (s.applyClaudePlugin ? " on" : "")} role="switch" aria-checked={!!s.applyClaudePlugin} aria-label="应用到 Claude Code 插件" onClick={toggleClaudePlugin} />
+            </div>
+            <div className="set-row">
+              <div className="set-copy">
+                <div className="l">跳过 Claude Code 初次安装确认</div>
+                <div className="d">向 ~/.claude.json 写入 hasCompletedOnboarding，跳过首次运行引导</div>
+              </div>
+              <button type="button" className={"switch" + (s.skipClaudeOnboarding ? " on" : "")} role="switch" aria-checked={!!s.skipClaudeOnboarding} aria-label="跳过 Claude Code 初次安装确认" onClick={toggleClaudeOnboarding} />
+            </div>
+          </div>
+
+          <div className="set-group">
+            <h4>配置目录</h4>
+            <div className="set-row config-dir-row">
+              <div className="set-copy">
+                <div className="l">快速打开配置文件目录</div>
+                <div className="d">在系统文件管理器中打开对应目录，方便直接查看/编辑（目录不存在时打开用户主目录）</div>
+              </div>
+              <div className="dir-actions">
+                <button type="button" className="btn folder-btn" onClick={() => openDir("claude")}><FolderIcon />Claude</button>
+                <button type="button" className="btn folder-btn" onClick={() => openDir("codex")}><FolderIcon />Codex</button>
+                <button type="button" className="btn folder-btn" onClick={() => openDir("app")}><FolderIcon />z-switch</button>
               </div>
             </div>
           </div>

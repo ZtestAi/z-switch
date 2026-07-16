@@ -124,6 +124,8 @@ impl Root {
                 "autoLaunch": false,
                 "backupBeforeWrite": true,
                 "initialImportDone": false,
+                "applyClaudePlugin": false,
+                "skipClaudeOnboarding": false,
                 "reliability": {
                     "proxyEnabled": false,
                     "failoverEnabled": false,

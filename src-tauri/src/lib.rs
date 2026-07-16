@@ -1,4 +1,5 @@
 //! z-switch 后端入口 + Tauri 命令。
+mod claude_ext;
 mod config;
 mod connectivity;
 mod live;
@@ -36,6 +37,16 @@ fn backup_flag(root: &Root) -> bool {
 /// - 直连模式：backfill 旧项 → 写目标 live → 更新 current。
 /// - 代理模式：中转站之间只热切换内存 target；官方账号保持客户端直连，
 ///   在官方账号与中转站跨类型切换时才重写对应 app 的 live。
+/// 切换/恢复后按需同步 VS Code 扩展放行标记（`~/.claude/config.json` 的 primaryApiKey）。
+/// best-effort：仅 claude 且用户开了「应用到插件」开关时生效，失败只记日志、不影响切换本身。
+fn sync_claude_plugin_after_switch(plugin_on: bool, app: &str, target_is_official: bool) {
+    if plugin_on && app == "claude" {
+        if let Err(e) = claude_ext::apply_primary_api_key(!target_is_official) {
+            eprintln!("[z-switch] 同步 Claude Code 插件放行标记失败: {e}");
+        }
+    }
+}
+
 pub(crate) fn switch_in_place(
     root: &mut Root,
     app: &str,
@@ -43,6 +54,12 @@ pub(crate) fn switch_in_place(
     backup: bool,
     proxy_handle: Option<&proxy::ProxyHandle>,
 ) -> Result<(), String> {
+    // 借用 data 前先读设置（避免与 apps 的可变借用冲突）。
+    let plugin_on = root
+        .settings
+        .get("applyClaudePlugin")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let data = root
         .apps
         .get_mut(app)
@@ -94,6 +111,7 @@ pub(crate) fn switch_in_place(
             }
         }
         data.current = Some(id.to_string());
+        sync_claude_plugin_after_switch(plugin_on, app, target_is_official);
         return Ok(());
     }
 
@@ -107,6 +125,7 @@ pub(crate) fn switch_in_place(
     }
     live::write_live(app, &target, backup)?;
     data.current = Some(id.to_string());
+    sync_claude_plugin_after_switch(plugin_on, app, target_is_official);
     Ok(())
 }
 
@@ -207,6 +226,15 @@ fn delete_provider(
     data.providers.remove(&id);
     data.order.retain(|x| x != &id);
     persist(&root)?;
+    // 删除当前项并「恢复原始配置」= 回到官方直连，清掉插件放行标记。
+    if is_current && active_mode.as_deref() == Some("restore") {
+        let plugin_on = root
+            .settings
+            .get("applyClaudePlugin")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        sync_claude_plugin_after_switch(plugin_on, &app, true);
+    }
     let out = root.clone();
     drop(root);
     tray::refresh(&app_handle);
@@ -217,6 +245,44 @@ fn delete_provider(
 #[tauri::command]
 fn original_config_status() -> original::OriginalConfigStatus {
     original::status()
+}
+
+/// 用系统文件管理器打开一个目录（跨平台）。
+fn reveal_dir_in_file_manager(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let result = std::process::Command::new("explorer.exe").arg(path).spawn();
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open").arg(path).spawn();
+    #[cfg(target_os = "linux")]
+    let result = std::process::Command::new("xdg-open").arg(path).spawn();
+    result
+        .map(|_| ())
+        .map_err(|error| format!("打开目录 {} 失败：{error}", path.display()))
+}
+
+/// 打开指定配置文件所在目录，方便用户直接查看/编辑：
+/// claude → ~/.claude（settings.json、config.json）；codex → ~/.codex（auth.json、config.toml）；
+/// app → ~/.z-switch（providers.json、backups）。目录不存在时退回打开用户主目录，避免空按钮，
+/// 且不擅自创建 Claude/Codex 目录。
+#[tauri::command]
+fn open_config_dir(kind: String) -> Result<(), String> {
+    let path = match kind.as_str() {
+        "claude" => config::get_home_dir().join(".claude"),
+        "codex" => config::get_home_dir().join(".codex"),
+        "app" => config::get_app_config_dir(),
+        other => return Err(format!("未知配置目录：{other}")),
+    };
+    if kind == "app" {
+        let _ = std::fs::create_dir_all(&path);
+    }
+    // 不做 canonicalize：Windows 上它会返回 \\?\ 扩展长度路径，explorer.exe 往往不认。
+    // get_home_dir().join(...) 已是普通绝对路径，直接交给文件管理器即可。
+    let target = if path.exists() {
+        path
+    } else {
+        config::get_home_dir()
+    };
+    reveal_dir_in_file_manager(&target)
 }
 
 /// 创建并使用系统文件管理器打开写前备份目录。
@@ -289,6 +355,13 @@ fn restore_original(
     // “原始配置”可能本来就是用户已有的中转配置，它属于灾难恢复，
     // 不能冒充官方账号的生效状态。
     data.current = None;
+    // 恢复原始配置 = 回官方直连，清掉插件放行标记。
+    let plugin_on = root
+        .settings
+        .get("applyClaudePlugin")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    sync_claude_plugin_after_switch(plugin_on, &app, true);
     persist(&root)?;
     let out = root.clone();
     drop(root);
@@ -481,6 +554,30 @@ fn save_settings(state: State<AppState>, settings: serde_json::Value) -> Result<
     root.settings = settings;
     persist(&root)?;
     Ok(root.clone())
+}
+
+/// 「应用到 Claude Code 插件」开关的**文件副作用**：立即按当前 Claude 供应商同步放行标记。
+/// 开→当前是第三方则写 primaryApiKey=any、官方则删除；关→一律删除。仅动 ~/.claude/config.json。
+/// 设置本身（applyClaudePlugin）的持久化由前端走 save_settings，与其它开关一致。
+#[tauri::command]
+fn set_claude_plugin_enabled(state: State<AppState>, enabled: bool) -> Result<(), String> {
+    // 只在锁内读一下当前 claude 供应商是否官方，随即释放锁再写文件。
+    let managed = enabled && {
+        let root = state.0.lock().unwrap();
+        let data = root.apps.get("claude");
+        data.and_then(|d| d.current.clone())
+            .and_then(|id| data.and_then(|d| d.providers.get(&id).cloned()))
+            .map(|p| !store::is_official_provider(&p))
+            .unwrap_or(false)
+    };
+    claude_ext::apply_primary_api_key(managed)
+}
+
+/// 「跳过 Claude Code 初次安装确认」开关的**文件副作用**：写/删 ~/.claude.json 的
+/// hasCompletedOnboarding。设置本身的持久化同样由前端 save_settings 负责。
+#[tauri::command]
+fn set_claude_onboarding_skip(enabled: bool) -> Result<(), String> {
+    claude_ext::apply_onboarding_completed(enabled)
 }
 
 /// 导出为格式化 JSON 字符串
@@ -749,6 +846,7 @@ pub fn run() {
             import_live,
             original_config_status,
             open_backups_folder,
+            open_config_dir,
             open_help_document,
             open_proxy_log_folder,
             clear_proxy_error_log,
@@ -757,7 +855,9 @@ pub fn run() {
             test_stream,
             set_auto_launch,
             proxy_status,
-            set_proxy_enabled
+            set_proxy_enabled,
+            set_claude_plugin_enabled,
+            set_claude_onboarding_skip
         ])
         .setup(|app| {
             // 运行时注册 zswitch:// 协议（便于未装安装包时也能测试深链）

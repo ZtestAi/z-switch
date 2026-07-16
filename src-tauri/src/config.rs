@@ -127,3 +127,9 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), String> {
         format!("原子替换失败 {} -> {}: {e}", tmp.display(), path.display())
     })
 }
+
+/// 测试专用：串行化所有会改动进程级 `Z_SWITCH_TEST_HOME` 的用例。
+/// get_home_dir 读进程级环境变量，多个测试并发改它会互相看到对方的 home
+/// （甚至被 remove_var 打回真实 home），因此凡是设置该变量的测试都要先拿这把锁。
+#[cfg(test)]
+pub(crate) static TEST_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
