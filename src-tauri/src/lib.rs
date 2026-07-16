@@ -829,6 +829,33 @@ fn unique_id(providers: &std::collections::HashMap<String, Provider>, base: &str
     }
 }
 
+/// Windows 11 起，为无边框窗口（`decorations: false`）显式声明圆角。
+/// 无边框窗口 DWM 默认不自动圆角，需设 `DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND`。
+/// Win10 无此能力，系统忽略该属性、保持直角，无副作用；macOS/Linux 不涉及。
+#[cfg(windows)]
+fn apply_rounded_corners(window: &tauri::WebviewWindow) {
+    use std::ffi::c_void;
+    const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
+    const DWMWCP_ROUND: u32 = 2;
+    #[link(name = "dwmapi")]
+    extern "system" {
+        fn DwmSetWindowAttribute(hwnd: isize, attr: u32, value: *const c_void, size: u32) -> i32;
+    }
+    let Ok(hwnd) = window.hwnd() else {
+        return;
+    };
+    let pref: u32 = DWMWCP_ROUND;
+    // best-effort：失败（如 Win10 不支持）时静默保持直角。
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd.0 as isize,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &pref as *const u32 as *const c_void,
+            std::mem::size_of::<u32>() as u32,
+        );
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let mut root = store::load();
@@ -978,6 +1005,13 @@ pub fn run() {
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
                 let _ = app.deep_link().register_all();
+            }
+            // Windows 11 无边框窗口圆角（Win10 静默忽略）。
+            #[cfg(windows)]
+            {
+                if let Some(window) = app.get_webview_window("main") {
+                    apply_rounded_corners(&window);
+                }
             }
             let menu = tray::build_menu(app.handle())?;
             tauri::tray::TrayIconBuilder::with_id(tray::TRAY_ID)
