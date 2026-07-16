@@ -38,6 +38,41 @@ fn probe_urls(base_url: &str) -> Vec<String> {
     out
 }
 
+/// 端点测速：HTTP 层探测，测「发出请求 → 收到首个响应」的真实往返耗时（毫秒，
+/// 保留亚毫秒精度）。不需要 key——发不带鉴权的 GET，401/404 等任意响应都代表请求
+/// 真实到达了上游。
+///
+/// 为什么不用纯 TCP connect：`connect()` 会被本机 TUN / 透明代理（Clash fake-ip 之类）
+/// 就地应答，握手在微秒级完成，量出 <1ms 的假象——那根本没到真实端点。HTTP 请求
+/// 必须被代理转发到上游、等真实响应回来，故能量到真实链路延迟。
+pub async fn latency(base_url: &str) -> Result<f64, String> {
+    let urls = probe_urls(base_url);
+    if urls.is_empty() {
+        return Err("请先填写 Base URL".into());
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let mut last_err = String::from("无法连接");
+    for url in urls {
+        let start = std::time::Instant::now();
+        match client.get(&url).send().await {
+            // 收到任何响应（含 401/404）都说明真实到达了端点，计时有效。
+            Ok(_resp) => return Ok(start.elapsed().as_secs_f64() * 1000.0),
+            Err(e) => {
+                last_err = if e.is_timeout() {
+                    format!("{url} 超时")
+                } else {
+                    format!("{url} 连接失败")
+                };
+            }
+        }
+    }
+    Err(last_err)
+}
+
 /// 测试连通性。约定：
 /// - 2xx → ok
 /// - 401/403 → unauthorized（地址对、key 不对）

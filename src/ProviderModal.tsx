@@ -8,6 +8,9 @@ import {
   inferWireApi,
   inferClaudeKeyField,
   needsV1Suffix,
+  hasClaudeOneMMarker,
+  stripClaudeOneMMarker,
+  setClaudeOneMMarker,
 } from "./providerFactory";
 import {
   AlertIcon,
@@ -222,6 +225,37 @@ export default function ProviderModal({ app, initial, existingIds, onClose, onSa
     setV1Hint(false);
   }
 
+  // sonnet/opus/fable 三档：输入框显示裸模型名，[1M] 由独立复选框控制（照 ccsw）。
+  // haiku 与主模型不支持 1M，不渲染此复选框。
+  function renderOneMRow(
+    label: string,
+    placeholder: string,
+    value: string,
+    setValue: (v: string) => void,
+  ) {
+    const oneM = hasClaudeOneMMarker(value);
+    return (
+      <div className="lvl-row">
+        <span className="lvl">{label}</span>
+        <ModelPicker
+          value={stripClaudeOneMMarker(value)}
+          models={fetchedModels}
+          ariaLabel={`${label} 默认模型`}
+          placeholder={placeholder}
+          onChange={(v) => setValue(oneM ? setClaudeOneMMarker(v, true) : stripClaudeOneMMarker(v))}
+        />
+        <label className="onem-toggle" title="启用 1M 长上下文（给模型名追加 [1M]）">
+          <input
+            type="checkbox"
+            checked={oneM}
+            onChange={(e) => setValue(setClaudeOneMMarker(value, e.target.checked))}
+          />
+          1M
+        </label>
+      </div>
+    );
+  }
+
   async function doTestConn() {
     if (!baseUrl.trim()) return;
     setConn("testing");
@@ -303,7 +337,7 @@ export default function ProviderModal({ app, initial, existingIds, onClose, onSa
             disabled={speed.loading || missingEndpoint}
             title={missingEndpoint ? "请先填写 Base URL" : "测试端点网络延迟"}
           >
-            {speed.loading ? "测速中…" : speed.err ? <><BoltIcon />超时</> : speed.ms != null ? <><BoltIcon />{speed.ms}ms</> : <><BoltIcon />测速</>}
+            {speed.loading ? "测速中…" : speed.err ? <><BoltIcon />超时</> : speed.ms != null ? <><BoltIcon />{speed.ms < 1 ? "<1ms" : `${Math.round(speed.ms)}ms`}</> : <><BoltIcon />测速</>}
           </button>
         </div>
         {(connMsg || fetchMsg) && (
@@ -459,36 +493,9 @@ export default function ProviderModal({ app, initial, existingIds, onClose, onSa
                         onChange={setHaiku}
                       />
                     </div>
-                    <div className="lvl-row">
-                      <span className="lvl">Sonnet</span>
-                      <ModelPicker
-                        value={sonnet}
-                        models={fetchedModels}
-                        ariaLabel="Sonnet 默认模型"
-                        placeholder="默认主力模型"
-                        onChange={setSonnet}
-                      />
-                    </div>
-                    <div className="lvl-row">
-                      <span className="lvl">Opus</span>
-                      <ModelPicker
-                        value={opus}
-                        models={fetchedModels}
-                        ariaLabel="Opus 默认模型"
-                        placeholder="最强 / 复杂任务模型"
-                        onChange={setOpus}
-                      />
-                    </div>
-                    <div className="lvl-row">
-                      <span className="lvl">Fable</span>
-                      <ModelPicker
-                        value={fable}
-                        models={fetchedModels}
-                        ariaLabel="Fable 默认模型"
-                        placeholder="前沿 / 自主任务模型"
-                        onChange={setFable}
-                      />
-                    </div>
+                    {renderOneMRow("Sonnet", "默认主力模型", sonnet, setSonnet)}
+                    {renderOneMRow("Opus", "最强 / 复杂任务模型", opus, setOpus)}
+                    {renderOneMRow("Fable", "前沿 / 自主任务模型", fable, setFable)}
                   </div>
                 </>
               ) : (

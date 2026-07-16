@@ -114,7 +114,7 @@ function latText(l?: Lat): string {
   if (!l) return "未测";
   if (l.loading) return "…";
   if (l.err) return "超时";
-  if (l.ms != null) return `${l.ms}ms`;
+  if (l.ms != null) return l.ms < 1 ? "<1ms" : `${Math.round(l.ms)}ms`;
   return "未测";
 }
 // 信号条点亮数：good=3 / mid=2 / slow=1 / 其它=0

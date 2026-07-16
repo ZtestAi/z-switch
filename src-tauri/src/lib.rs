@@ -7,7 +7,6 @@ mod official;
 mod original;
 mod proxy;
 mod proxy_log;
-mod speed;
 mod store;
 mod stream_test;
 mod tray;
@@ -71,8 +70,11 @@ pub(crate) fn switch_in_place(
             let runtime_target = proxy::target_from_provider(app, &target)
                 .ok_or_else(|| format!("供应商 {} 缺少可转发的 Base URL", target.name))?;
 
-            // 从官方直连进入代理时，需要先保存最新登录态，再把 live 改为 localhost。
-            if current_is_official {
+            // 从官方直连、或“无当前供应商”（如刚恢复过 Codex，current=None、
+            // live 已被写回官方 config.toml）进入代理时，live 此刻并不是 localhost
+            // 配置，必须先保存登录态、再把 live 改成 localhost，否则客户端仍直连官方，
+            // 代理的内存 target 根本用不上（#3：恢复后切第三方不生效）。
+            if current_is_official || current_id.is_none() {
                 if let Some(current) = current_id.as_ref() {
                     if current != id {
                         if let Some(old) = data.providers.get_mut(current) {
@@ -488,10 +490,11 @@ fn export_json(state: State<AppState>) -> Result<String, String> {
     serde_json::to_string_pretty(&*root).map_err(|e| e.to_string())
 }
 
-/// 端点测速（TCP 连接毫秒）
+/// 端点测速（HTTP 层往返毫秒，保留亚毫秒精度）。
+/// 走 HTTP 而非纯 TCP，避免本机 TUN/透明代理就地应答导致的 <1ms 失真。
 #[tauri::command]
-fn speedtest(url: String) -> Result<u64, String> {
-    speed::tcp_latency(&url)
+async fn speedtest(url: String) -> Result<f64, String> {
+    connectivity::latency(&url).await
 }
 
 /// 拉取供应商可用模型列表

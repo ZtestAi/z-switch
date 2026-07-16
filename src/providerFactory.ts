@@ -72,6 +72,29 @@ export function needsV1Suffix(baseUrl: string): boolean {
   return true;
 }
 
+/**
+ * Claude 1M 长上下文标记：给模型名追加 `[1M]` 后缀，Claude Code 据此对该
+ * 模型启用 100 万 token 上下文（照 cc-switch 原版做法——不写 ANTHROPIC_BETA
+ * 之类 env，标记就内嵌在模型名字符串里）。仅 sonnet/opus/fable 三档适用。
+ */
+export const CLAUDE_ONE_M_MARKER = "[1M]";
+
+export function hasClaudeOneMMarker(model: string): boolean {
+  return model.trimEnd().toLowerCase().endsWith("[1m]");
+}
+
+export function stripClaudeOneMMarker(model: string): string {
+  const trimmed = model.trimEnd();
+  if (!trimmed.toLowerCase().endsWith("[1m]")) return model;
+  return trimmed.slice(0, -CLAUDE_ONE_M_MARKER.length).trimEnd();
+}
+
+export function setClaudeOneMMarker(model: string, enabled: boolean): string {
+  const base = stripClaudeOneMMarker(model).trim();
+  if (!base) return ""; // 空模型名不产生只有 [1M] 的脏值
+  return enabled ? `${base}${CLAUDE_ONE_M_MARKER}` : base;
+}
+
 export function inferClaudeKeyField(
   baseUrl: string,
 ): "ANTHROPIC_AUTH_TOKEN" | "ANTHROPIC_API_KEY" | null {

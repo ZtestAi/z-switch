@@ -428,6 +428,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .lvl-row:last-child { margin-bottom: 0; }
 .lvl { flex: none; width: 58px; font-family: var(--mono); font-size: var(--text-sm); font-weight: 700; color: var(--accent-text); background: var(--accent-soft); border-radius: var(--r-sm); padding: 5px 0; text-align: center; }
 .lvl-row input { flex: 1; min-width: 0; }
+.onem-toggle { flex: none; display: inline-flex; align-items: center; gap: 4px; font-family: var(--mono); font-size: var(--text-sm); font-weight: 700; color: var(--muted); cursor: pointer; user-select: none; }
+.onem-toggle input { flex: none; width: auto; min-width: 0; margin: 0; cursor: pointer; }
+.onem-toggle:has(input:checked) { color: var(--accent-text); }
 .kv-row { display: flex; gap: 6px; margin-bottom: 6px; align-items: center; }
 .kv-row input { flex: 1; }
 .kv-row .del { flex: none; }
