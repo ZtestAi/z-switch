@@ -156,6 +156,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .icon-btn { height: var(--control-md); padding: 0 11px; border-radius: var(--r); border: 1px solid var(--border); background: #fff; color: var(--fg-sec); font-size: var(--text-body); line-height: 1; font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap; }
 .icon-btn:hover { background: var(--bg-soft); color: var(--fg); }
 .icon-btn.icon-only { width: var(--control-md); padding: 0; }
+.icon-btn.has-badge { position: relative; }
+.update-dot { position: absolute; top: 3px; right: 3px; width: 8px; height: 8px; border-radius: 50%; background: var(--danger); box-shadow: 0 0 0 2px #fff; }
+:root[data-theme="dark"] .update-dot { box-shadow: 0 0 0 2px var(--bg-soft); }
+.update-row { align-items: center; }
 .card-icon-btn { width: var(--control-sm); height: var(--control-sm); padding: 0; border-radius: var(--r-sm); border: 1px solid var(--border); background: #fff; color: var(--fg-muted); cursor: pointer; display: grid; place-items: center; }
 .card-icon-btn:hover { background: var(--bg-soft); color: var(--fg); border-color: hsl(200 14% 72%); }
 .copy-btn:hover { color: var(--accent-text); border-color: var(--accent-border); background: var(--accent-soft); }

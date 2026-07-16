@@ -23,6 +23,7 @@ import Titlebar from "./Titlebar";
 import ConfirmDialog from "./ConfirmDialog";
 import Toasts, { type Toast, type ToastKind } from "./Toasts";
 import { buildClaudeProvider, buildCodexProvider, DEFAULT_CODEX_WIRE_API } from "./providerFactory";
+import { checkForUpdate, installAndRelaunch, type Update } from "./updater";
 import { onOpenUrl, getCurrent } from "@tauri-apps/plugin-deep-link";
 import { listen } from "@tauri-apps/api/event";
 import { applyTheme, type Theme } from "./theme";
@@ -126,6 +127,9 @@ export default function App() {
   const [dragId, setDragId] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
   const [originalStatus, setOriginalStatus] = useState<OriginalConfigStatus | null>(null);
+  const [updateInfo, setUpdateInfo] = useState<Update | null>(null);
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState<number | null>(null);
   const [confirm, setConfirm] = useState<null | {
     title?: string;
     message: string;
@@ -149,7 +153,34 @@ export default function App() {
   useEffect(() => {
     getConfig().then(setRoot).catch((e) => pushToast("error", String(e)));
     originalConfigStatus().then(setOriginalStatus).catch(() => {});
+    // 启动静默检查更新：有新版只置标识，绝不弹窗/toast 打扰用户。
+    checkForUpdate()
+      .then((update) => setUpdateInfo(update))
+      .catch(() => {});
   }, []);
+
+  // 设置页「检查更新」手动触发：无更新时给一次成功提示。
+  async function handleCheckUpdate() {
+    const update = await checkForUpdate();
+    setUpdateInfo(update);
+    if (!update) pushToast("success", "已是最新版本");
+  }
+
+  // 下载并安装更新，完成后自动重启。
+  async function handleInstallUpdate() {
+    if (!updateInfo || updateBusy) return;
+    setUpdateBusy(true);
+    setUpdateProgress(0);
+    try {
+      await installAndRelaunch(updateInfo, (downloaded, total) => {
+        setUpdateProgress(total ? Math.round((downloaded / total) * 100) : null);
+      });
+    } catch (e) {
+      pushToast("error", "更新失败：" + String(e));
+      setUpdateBusy(false);
+      setUpdateProgress(null);
+    }
+  }
 
   // 应用主题（settings.theme 变化时）
   const theme = (root?.settings as any)?.theme as Theme | undefined;
@@ -463,7 +494,7 @@ export default function App() {
           <button className="icon-btn" onClick={speedtestAll} title="测速全部端点"><BoltIcon />测速</button>
           <button className="icon-btn icon-only" onClick={() => setIo("import")} title="导入 JSON" aria-label="导入 JSON"><DownloadIcon /></button>
           <button className="icon-btn icon-only" onClick={() => setIo("export")} title="导出 JSON" aria-label="导出 JSON"><UploadIcon /></button>
-          <button className="icon-btn icon-only" onClick={() => setShowSettings(true)} title="设置" aria-label="设置"><SettingsIcon /></button>
+          <button className={"icon-btn icon-only" + (updateInfo ? " has-badge" : "")} onClick={() => setShowSettings(true)} title={updateInfo ? "设置 · 有新版本可用" : "设置"} aria-label="设置"><SettingsIcon />{updateInfo && <span className="update-dot" />}</button>
           <button className="btn accent" onClick={() => setModal({})}><PlusIcon />添加</button>
         </div>
       </div>
@@ -609,6 +640,11 @@ export default function App() {
           onSave={onSaveSettings}
           onRestoreOriginal={onRestoreOriginal}
           onToast={pushToast}
+          updateInfo={updateInfo}
+          updateBusy={updateBusy}
+          updateProgress={updateProgress}
+          onCheckUpdate={handleCheckUpdate}
+          onInstallUpdate={handleInstallUpdate}
         />
       )}
       {io && (

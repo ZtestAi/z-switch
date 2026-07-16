@@ -9,6 +9,8 @@ import {
   type OriginalConfigStatus,
 } from "./api";
 import type { AppType } from "./types";
+import type { Update } from "./updater";
+import { getVersion } from "@tauri-apps/api/app";
 import { ChevronDownIcon, ChevronRightIcon, ClockIcon, CloseIcon, FolderIcon, TrashIcon } from "./Icons";
 
 interface Props {
@@ -18,6 +20,11 @@ interface Props {
   onSave: (s: Record<string, any>) => void;
   onRestoreOriginal: (app: AppType) => void;
   onToast?: (kind: "success" | "error", msg: string) => void;
+  updateInfo: Update | null;
+  updateBusy: boolean;
+  updateProgress: number | null;
+  onCheckUpdate: () => Promise<void>;
+  onInstallUpdate: () => void;
 }
 
 export default function SettingsModal({
@@ -27,7 +34,30 @@ export default function SettingsModal({
   onSave,
   onRestoreOriginal,
   onToast,
+  updateInfo,
+  updateBusy,
+  updateProgress,
+  onCheckUpdate,
+  onInstallUpdate,
 }: Props) {
+  const [version, setVersion] = useState("");
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+
+  useEffect(() => {
+    getVersion().then(setVersion).catch(() => {});
+  }, []);
+
+  async function checkUpdate() {
+    if (checkingUpdate) return;
+    setCheckingUpdate(true);
+    try {
+      await onCheckUpdate();
+    } catch (e) {
+      onToast?.("error", "检查更新失败：" + String(e));
+    } finally {
+      setCheckingUpdate(false);
+    }
+  }
   const [s, setS] = useState<Record<string, any>>({ ...settings });
   const [proxyOn, setProxyOn] = useState(false);
   const [proxyPort, setProxyPort] = useState(8899);
@@ -315,10 +345,40 @@ export default function SettingsModal({
             <h4>关于</h4>
             <div className="set-row">
               <div>
-                <div className="l">z-switch v0.1.0</div>
+                <div className="l">z-switch{version ? ` v${version}` : ""}</div>
                 <div className="d">开源 · 无广告 · 由 真测 Ztest 出品</div>
               </div>
+              <button
+                type="button"
+                className="btn"
+                onClick={checkUpdate}
+                disabled={checkingUpdate || updateBusy}
+              >
+                {checkingUpdate ? "检查中…" : "检查更新"}
+              </button>
             </div>
+            {updateInfo && (
+              <div className="set-row update-row">
+                <div>
+                  <div className="l status-running"><span className="status-dot" />发现新版本 v{updateInfo.version}</div>
+                  <div className="d">
+                    {updateBusy
+                      ? updateProgress != null
+                        ? `正在下载并安装… ${updateProgress}%`
+                        : "正在下载并安装…"
+                      : "下载完成后将自动重启应用完成更新。"}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="btn accent"
+                  onClick={onInstallUpdate}
+                  disabled={updateBusy}
+                >
+                  {updateBusy ? "更新中…" : "更新并重启"}
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </div>
