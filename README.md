@@ -15,7 +15,7 @@
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5.8-3178C6?logo=typescript&logoColor=white" />
   <img alt="Rust" src="https://img.shields.io/badge/Rust-stable-000000?logo=rust&logoColor=white" />
   <img alt="License" src="https://img.shields.io/badge/license-MIT-green" />
-  <img alt="Version" src="https://img.shields.io/badge/version-0.1.0-blue" />
+  <img alt="Version" src="https://img.shields.io/badge/version-0.2.0-blue" />
 </p>
 
 </div>

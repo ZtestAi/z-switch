@@ -1,6 +1,6 @@
 [package]
 name = "z-switch"
-version = "0.1.0"
+version = "0.2.0"
 description = "z-switch · 开源无广告的 Claude Code / Codex 供应商一键切换工具（由 真测 Ztest 出品）"
 authors = ["ztest.ai"]
 edition = "2021"
