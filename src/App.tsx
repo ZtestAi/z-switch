@@ -24,8 +24,9 @@ import ImportExportModal from "./ImportExportModal";
 import StreamTestModal, { type StreamTestSummary } from "./StreamTestModal";
 import Titlebar from "./Titlebar";
 import ConfirmDialog from "./ConfirmDialog";
+import DeepLinkImportDialog, { type PendingImport } from "./DeepLinkImportDialog";
 import Toasts, { type Toast, type ToastKind } from "./Toasts";
-import { buildClaudeProvider, buildCodexProvider, DEFAULT_CODEX_WIRE_API } from "./providerFactory";
+import { buildClaudeProvider, buildCodexProvider, DEFAULT_CODEX_WIRE_API, isHttpUrl, maskSecret } from "./providerFactory";
 import { checkForUpdate, installAndRelaunch, type Update } from "./updater";
 import { onOpenUrl, getCurrent } from "@tauri-apps/plugin-deep-link";
 import { listen } from "@tauri-apps/api/event";
@@ -77,6 +78,30 @@ function summarize(p: Provider): { url: string; model: string } {
 function slug(s: string): string {
   const t = s.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
   return t || `imported-${Math.floor(Math.random() * 1e6).toString(36)}`;
+}
+
+// 深链导入的身份判定：直接比对现有「名称」（slug 对中文会返回随机值，不能用来判同名）。
+// 同名则给显示名加数字后缀（满血 → 满血 2），并保证 id 也唯一，绝不覆盖已有供应商。
+function uniqueImportIdentity(
+  requested: string,
+  providers: Record<string, Provider>,
+): { name: string; id: string; collision: boolean } {
+  const names = new Set(Object.values(providers).map((p) => p.name));
+  const ids = new Set(Object.keys(providers));
+  let name = requested;
+  let n = 1;
+  while (names.has(name)) {
+    n += 1;
+    name = `${requested} ${n}`;
+  }
+  const base = slug(name);
+  let id = base;
+  let m = 2;
+  while (ids.has(id)) {
+    id = `${base}-${m}`;
+    m += 1;
+  }
+  return { name, id, collision: name !== requested };
 }
 
 function copyNameOf(name: string, providers: Record<string, Provider>): string {
@@ -134,6 +159,9 @@ const BAR_HEIGHTS = [5, 8, 12];
 
 export default function App() {
   const [root, setRoot] = useState<Root | null>(null);
+  // 深链在 []-effect 里运行，闭包里的 root 会是挂载时的旧值；用 ref 取最新配置算唯一 id。
+  const rootRef = useRef<Root | null>(null);
+  rootRef.current = root;
   const [tab, setTab] = useState<AppType>("claude");
   const [lat, setLat] = useState<Record<string, Lat>>({});
   const [modal, setModal] = useState<null | { edit?: Provider }>(null);
@@ -161,6 +189,7 @@ export default function App() {
     onConfirm: () => void;
     onSecondary?: () => void;
   }>(null);
+  const [pendingImport, setPendingImport] = useState<PendingImport | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const toastId = useRef(0);
   const dragSourceRef = useRef<string | null>(null);
@@ -285,20 +314,37 @@ export default function App() {
         const q = u.searchParams;
         const appk = (q.get("app") === "codex" ? "codex" : "claude") as AppType;
         const nm = q.get("name") || "导入的供应商";
-        const baseUrl = q.get("baseUrl") || "";
-        const key = q.get("key") || "";
+        const baseUrl = (q.get("baseUrl") || "").trim();
+        // 密钥：支持明文 key，或 base64 的 keyB64（减少原文出现在 URL 里）。
+        let key = q.get("key") || "";
+        const kb64 = q.get("keyB64");
+        if (!key && kb64) {
+          try {
+            key = atob(kb64);
+          } catch {
+            /* 非法 base64，忽略，按未提供处理 */
+          }
+        }
         const model = q.get("model") || "";
-        const id = slug(nm);
+        // 校验：接入点必须是 http(s)，否则拒绝（不弹框、不落盘）。
+        if (!isHttpUrl(baseUrl)) {
+          pushToast("error", "链接被拒绝：接入点必须是 http(s) 地址");
+          return;
+        }
+        // 绝不覆盖已有供应商：同名则加数字后缀新增一张（保证 name 与 id 都唯一），
+        // 让不同分组（满血 / 其他渠道 …）能并存，也让重复导入可区分而非静默盖掉。
+        const providers = rootRef.current?.apps[appk]?.providers ?? {};
+        const { name: finalName, id, collision } = uniqueImportIdentity(nm, providers);
         const provider =
           appk === "codex"
             ? buildCodexProvider(
-                { id, name: nm, category: "custom", baseUrl, model: model || "gpt-5.5", wireApi: (q.get("wireApi") as any) || DEFAULT_CODEX_WIRE_API },
+                { id, name: finalName, category: "custom", baseUrl, model: model || "gpt-5.5", wireApi: (q.get("wireApi") as any) || DEFAULT_CODEX_WIRE_API },
                 key,
               )
             : buildClaudeProvider(
                 {
                   id,
-                  name: nm,
+                  name: finalName,
                   category: "custom",
                   baseUrl,
                   apiKeyField: (q.get("apiKeyField") as any) || "ANTHROPIC_AUTH_TOKEN",
@@ -310,13 +356,16 @@ export default function App() {
                 },
                 key,
               );
-        saveProvider(appk, provider)
-          .then((r) => {
-            setRoot(r);
-            setTab(appk);
-            pushToast("success", `已从链接导入「${nm}」`);
-          })
-          .catch((e) => pushToast("error", String(e)));
+        // 不直接落盘：暂存并弹确认框，让用户看清再导入（安全底线）。
+        setPendingImport({
+          app: appk,
+          name: finalName,
+          provider,
+          baseUrl,
+          model,
+          keyMasked: maskSecret(key),
+          collisionOf: collision ? nm : undefined,
+        });
       } catch (e) {
         pushToast("error", "链接解析失败：" + String(e));
       }
@@ -798,6 +847,23 @@ export default function App() {
           onConfirm={confirm.onConfirm}
           onSecondary={confirm.onSecondary}
           onCancel={() => setConfirm(null)}
+        />
+      )}
+      {pendingImport && (
+        <DeepLinkImportDialog
+          pending={pendingImport}
+          onCancel={() => setPendingImport(null)}
+          onConfirm={() => {
+            const p = pendingImport;
+            setPendingImport(null);
+            saveProvider(p.app, p.provider)
+              .then((r) => {
+                setRoot(r);
+                setTab(p.app);
+                pushToast("success", `已导入「${p.name}」`);
+              })
+              .catch((e) => pushToast("error", String(e)));
+          }}
         />
       )}
       <Toasts toasts={toasts} />

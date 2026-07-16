@@ -396,6 +396,12 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .confirm .modal-foot { justify-content: flex-end; }
 .confirm-actions { max-width: 100%; display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
 .confirm-actions .btn { flex: none; white-space: nowrap; }
+/* 深链导入预览 */
+.import-preview { margin-top: 12px; display: grid; grid-template-columns: auto 1fr; gap: 7px 12px; align-items: baseline; }
+.import-preview .ip-label { font-size: var(--text-sm); color: var(--fg-muted); font-weight: 700; white-space: nowrap; }
+.import-preview .ip-value { font-size: var(--text-body); word-break: break-all; }
+.import-preview .ip-value.mono { font-family: var(--mono); font-size: var(--text-sm); }
+.import-note { margin-top: 12px; font-size: var(--text-sm); color: var(--warning); line-height: 1.5; }
 
 /* toast */
 .toasts { position: fixed; top: 52px; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; gap: 8px; z-index: 100; pointer-events: none; }

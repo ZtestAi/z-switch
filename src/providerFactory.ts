@@ -95,6 +95,23 @@ export function setClaudeOneMMarker(model: string, enabled: boolean): string {
   return enabled ? `${base}${CLAUDE_ONE_M_MARKER}` : base;
 }
 
+/** 是否为合法的 http(s) URL（深链导入时校验接入点，拒绝非 http(s)）。 */
+export function isHttpUrl(s: string): boolean {
+  try {
+    const u = new URL(s.trim());
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+/** 密钥脱敏：仅用于预览显示，绝不显示全量。空 → 「（未提供）」；否则前 4 位 + 省略号。 */
+export function maskSecret(s: string): string {
+  const v = s.trim();
+  if (!v) return "（未提供）";
+  return v.length <= 4 ? "…" : `${v.slice(0, 4)}…`;
+}
+
 export function inferClaudeKeyField(
   baseUrl: string,
 ): "ANTHROPIC_AUTH_TOKEN" | "ANTHROPIC_API_KEY" | null {

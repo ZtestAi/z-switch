@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>z-switch 深链生成器 · zswitch://import</title>
+<style>
+  :root { --bg:#f6f8f9; --card:#fff; --border:#e3e8ea; --fg:#1a2226; --muted:#69787f; --accent:#0f8a86; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:28px 16px; background:var(--bg); color:var(--fg);
+         font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif; }
+  .wrap { max-width:720px; margin:0 auto; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  p.sub { color:var(--muted); margin:0 0 20px; font-size:13px; line-height:1.6; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:18px; margin-bottom:16px; }
+  label { display:block; font-size:13px; font-weight:700; margin:12px 0 5px; }
+  label:first-child { margin-top:0; }
+  input, select { width:100%; height:36px; padding:0 10px; border:1px solid var(--border); border-radius:8px;
+                  font-size:14px; background:#fff; color:var(--fg); }
+  .row { display:flex; gap:12px; }
+  .row > div { flex:1; }
+  .muted { color:var(--muted); font-weight:400; font-size:12px; }
+  .check { display:flex; align-items:center; gap:7px; margin-top:12px; font-size:13px; }
+  .check input { width:auto; height:auto; }
+  .out { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:13px; word-break:break-all;
+         background:#0e1a1c; color:#8ee6cf; padding:12px 14px; border-radius:8px; line-height:1.6; }
+  .btns { display:flex; gap:10px; margin-top:14px; flex-wrap:wrap; }
+  button { height:38px; padding:0 16px; border-radius:8px; border:1px solid var(--border); background:#fff;
+           color:var(--fg); font-size:14px; font-weight:700; cursor:pointer; }
+  button.accent { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .note { font-size:12px; color:var(--muted); line-height:1.7; margin-top:10px; }
+  details { margin-top:12px; } summary { cursor:pointer; font-size:13px; font-weight:700; color:var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>z-switch 深链生成器</h1>
+  <p class="sub">填写供应商信息，生成 <code>zswitch://import?…</code> 链接。用户在你的网站点击该链接即可唤起 z-switch，
+    <b>并弹出确认框</b>预览后再导入（不会静默写入、不会覆盖同名供应商）。</p>
+
+  <div class="card">
+    <label>应用</label>
+    <select id="app">
+      <option value="claude">Claude Code</option>
+      <option value="codex">Codex</option>
+    </select>
+
+    <label>名称 <span class="muted">显示在卡片上</span></label>
+    <input id="name" placeholder="例如：我的中转" />
+
+    <label>接入点 baseUrl <span class="muted">必须 http(s)</span></label>
+    <input id="baseUrl" placeholder="https://api.example.com/v1" />
+
+    <label>API Key</label>
+    <input id="key" placeholder="sk-…" />
+    <div class="check"><input type="checkbox" id="b64" /><label for="b64" style="margin:0;font-weight:400">对密钥做 base64（生成 keyB64，减少原文出现在链接里）</label></div>
+
+    <label>模型 <span class="muted">可选</span></label>
+    <input id="model" placeholder="claude-… / gpt-…" />
+
+    <details>
+      <summary>高级参数</summary>
+      <div class="row" style="margin-top:10px">
+        <div><label>apiKeyField（Claude）</label>
+          <select id="apiKeyField">
+            <option value="">默认 ANTHROPIC_AUTH_TOKEN</option>
+            <option value="ANTHROPIC_AUTH_TOKEN">ANTHROPIC_AUTH_TOKEN</option>
+            <option value="ANTHROPIC_API_KEY">ANTHROPIC_API_KEY</option>
+          </select></div>
+        <div><label>wireApi（Codex）</label>
+          <select id="wireApi">
+            <option value="">默认</option>
+            <option value="responses">responses</option>
+            <option value="chat">chat</option>
+          </select></div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <div><label>haiku</label><input id="haiku" /></div>
+        <div><label>sonnet</label><input id="sonnet" /></div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <div><label>opus</label><input id="opus" /></div>
+        <div><label>fable</label><input id="fable" /></div>
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
+    <div class="out" id="out">zswitch://import?app=claude</div>
+    <div class="btns">
+      <button class="accent" id="open">测试唤起 z-switch</button>
+      <button id="copy">复制链接</button>
+    </div>
+    <p class="note">安全说明：链接可能包含 API Key。keyB64 只是编码、非加密，无法阻止解码；请仅在可信页面/HTTPS 下分发，
+      并提醒用户在 z-switch 确认框中核对接入点后再导入。</p>
+  </div>
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const ids = ["app","name","baseUrl","key","model","apiKeyField","wireApi","haiku","sonnet","opus","fable","b64"];
+  function build() {
+    const app = $("app").value;
+    const p = new URLSearchParams();
+    p.set("app", app);
+    const add = (k, v) => { if (v) p.set(k, v); };
+    add("name", $("name").value.trim());
+    add("baseUrl", $("baseUrl").value.trim());
+    const key = $("key").value;
+    if (key) {
+      if ($("b64").checked) p.set("keyB64", btoa(key));
+      else p.set("key", key);
+    }
+    add("model", $("model").value.trim());
+    if (app === "claude") {
+      add("apiKeyField", $("apiKeyField").value);
+      add("haiku", $("haiku").value.trim());
+      add("sonnet", $("sonnet").value.trim());
+      add("opus", $("opus").value.trim());
+      add("fable", $("fable").value.trim());
+    } else {
+      add("wireApi", $("wireApi").value);
+    }
+    return "zswitch://import?" + p.toString();
+  }
+  function refresh() { $("out").textContent = build(); }
+  ids.forEach((id) => { const el = $(id); el.addEventListener("input", refresh); el.addEventListener("change", refresh); });
+  $("open").addEventListener("click", () => { window.location.href = build(); });
+  $("copy").addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(build()); $("copy").textContent = "已复制"; setTimeout(() => $("copy").textContent = "复制链接", 1200); }
+    catch { /* ignore */ }
+  });
+  refresh();
+</script>
+</body>
+</html>
