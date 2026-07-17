@@ -4,9 +4,11 @@
 
 # z-switch
 
-**面向 Claude Code 与 Codex 的桌面供应商一键切换器**
+**面向 Claude Code 与 Codex 的桌面供应商一键切换器 —— 直连原子改写或本地代理热切换**
 
-由 真测 Ztest · [ztest.ai](https://ztest.ai) 出品 · 开源 · 无广告 · 无返利链接
+One-click desktop provider switcher for Claude Code &amp; Codex — atomic direct-write or live hot-swap.
+
+由 真测 Ztest · [ztest.ai](https://ztest.ai) 出品 · 开源 · 无广告 · 无返利链接 · inspired by [cc-switch](https://github.com/farion1231/cc-switch)
 
 <p>
   <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-2b2b2b" />
