@@ -17,7 +17,9 @@ One-click desktop provider switcher for Claude Code &amp; Codex — atomic direc
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5.8-3178C6?logo=typescript&logoColor=white" />
   <img alt="Rust" src="https://img.shields.io/badge/Rust-stable-000000?logo=rust&logoColor=white" />
   <img alt="License" src="https://img.shields.io/badge/license-MIT-green" />
-  <img alt="Version" src="https://img.shields.io/badge/version-0.2.0-blue" />
+  <a href="https://github.com/ZtestAi/z-switch/releases"><img alt="Release" src="https://img.shields.io/github/v/release/ZtestAi/z-switch?logo=github" /></a>
+  <a href="https://github.com/ZtestAi/z-switch/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/ZtestAi/z-switch/total?logo=github&label=downloads" /></a>
+  <a href="https://github.com/ZtestAi/z-switch/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/ZtestAi/z-switch?style=flat&logo=github" /></a>
 </p>
 
 </div>
