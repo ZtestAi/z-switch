@@ -263,6 +263,7 @@ src-tauri/src/              后端（Rust + Tauri 2）
 ## 致谢
 
 - [**cc-switch**](https://github.com/farion1231/cc-switch)（MIT，Copyright © 2025 Jason Young）—— z-switch 的设计与实现参考了该项目，特此致谢。
+- 本项目接受 [**LINUX DO**](https://linux.do) 社区佬友的监督与反馈，感谢每一位提出建议的朋友。
 
 ## 许可
 
