@@ -44,6 +44,20 @@ function configOf(app: AppType, provider: Provider) {
   }
 
   const config = String(settings?.config ?? "");
+
+  if (app === "grok") {
+    // Grok 单文件 TOML：base 在 models_base_url、key 内嵌 api_key、协议看 api_backend。
+    return {
+      baseUrl: config.match(/models_base_url\s*=\s*"([^"]+)"/)?.[1] ?? "",
+      apiKey: config.match(/api_key\s*=\s*"([^"]+)"/)?.[1] ?? "",
+      model: config.match(/^model\s*=\s*"([^"]+)"/m)?.[1] ?? "",
+      wireApi: (config.match(/api_backend\s*=\s*"([^"]+)"/)?.[1] === "chat"
+        ? "chat"
+        : "responses") as "chat" | "responses",
+      apiKeyField: undefined,
+    };
+  }
+
   return {
     baseUrl: config.match(/base_url\s*=\s*"([^"]+)"/)?.[1] ?? "",
     apiKey: String(settings?.auth?.OPENAI_API_KEY ?? ""),
@@ -160,7 +174,7 @@ export default function StreamTestModal({ app, provider, onClose, onResult }: Pr
         </div>
         <div className="modal-body stream-test-body">
           <div className="stream-test-facts">
-            <span>{app === "claude" ? "Claude Messages" : config.wireApi === "responses" ? "Codex Responses" : "Codex Chat"}</span>
+            <span>{app === "claude" ? "Claude Messages" : `${app === "grok" ? "Grok" : "Codex"} ${config.wireApi === "responses" ? "Responses" : "Chat"}`}</span>
           </div>
           <div className="field stream-test-model-field">
             <label>

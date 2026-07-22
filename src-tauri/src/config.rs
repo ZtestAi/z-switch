@@ -51,6 +51,11 @@ pub fn get_codex_config_path() -> PathBuf {
     get_home_dir().join(".codex").join("config.toml")
 }
 
+/// Grok config：~/.grok/config.toml（单文件 TOML，直连写入）
+pub fn get_grok_config_path() -> PathBuf {
+    get_home_dir().join(".grok").join("config.toml")
+}
+
 /// 递归按字母排序对象的键，保证序列化输出确定性（数组顺序不变）。
 fn sort_json_keys(value: &Value) -> Value {
     match value {

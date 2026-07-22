@@ -74,6 +74,7 @@ pub fn backup_current_app(app: &str) {
             backup_file(&config::get_codex_auth_path(), "codex-auth");
             backup_file(&config::get_codex_config_path(), "codex-config");
         }
+        "grok" => backup_file(&config::get_grok_config_path(), "grok-config"),
         _ => {}
     }
 }
@@ -104,6 +105,41 @@ fn write_claude_live(env: &Value, backup: bool) -> Result<(), String> {
     }
     settings.insert("env".into(), env.clone());
     config::write_json_file(&path, &Value::Object(settings))
+}
+
+/// 写入干净的官方账号基线，**即使现有文件已损坏也绝不失败**。
+/// - 写前先备份现有文件（含非法 JSON / 损坏 toml）。
+/// - Claude：能解析则只清掉中转 env、保留其它顶层字段；不能解析则硬重置为 `{"env":{}}`。
+/// - Codex：整份覆盖写官方 auth 快照 + 无中转的 config（本来就不依赖解析旧文件）。
+pub fn write_official_baseline(app: &str, backup: bool) -> Result<(), String> {
+    match app {
+        "claude" => {
+            let path = config::get_claude_settings_path();
+            if backup {
+                backup_file(&path, "claude-settings");
+            }
+            match read_obj(&path) {
+                Ok(mut settings) => {
+                    let env = settings
+                        .get("env")
+                        .cloned()
+                        .unwrap_or_else(|| Value::Object(Map::new()));
+                    settings.insert("env".into(), sanitize_claude_official_env(&env));
+                    config::write_json_file(&path, &Value::Object(settings))
+                }
+                Err(_) => {
+                    // 损坏文件：硬重置为最小合法官方配置（坏文件已备份）。
+                    config::write_json_file(&path, &serde_json::json!({ "env": {} }))
+                }
+            }
+        }
+        "codex" => {
+            let auth = crate::official::codex_auth_for_restore()?;
+            // 空 config = 官方默认（无 model_provider / base_url）。
+            write_codex_live(&auth, "", backup)
+        }
+        other => Err(format!("未知应用: {other}")),
+    }
 }
 
 // ---------- Codex ----------
@@ -243,6 +279,23 @@ pub fn hydrate_official_provider(app: &str, provider: &mut Provider) -> bool {
     }
 }
 
+// ---------- Grok ----------
+
+/// 读取当前 live 的 ~/.grok/config.toml 文本（backfill / 导入用）。
+fn read_grok_live() -> Option<String> {
+    fs::read_to_string(config::get_grok_config_path()).ok()
+}
+
+/// 单文件写：整份 config.toml 原样落盘（写前备份）。
+/// Grok 无「官方账号」概念，不做 sanitize；停止管理走 original 快照恢复。
+fn write_grok_live(config_text: &str, backup: bool) -> Result<(), String> {
+    let path = config::get_grok_config_path();
+    if backup {
+        backup_file(&path, "grok-config");
+    }
+    config::write_text_file(&path, config_text)
+}
+
 // ---------- 对外统一入口 ----------
 
 /// 把目标 provider 写进 live 配置。
@@ -280,6 +333,14 @@ pub fn write_live(app: &str, provider: &Provider, backup: bool) -> Result<(), St
                 cfg = sanitize_codex_official_config(&cfg);
             }
             write_codex_live(&auth, &cfg, backup)
+        }
+        "grok" => {
+            let cfg = provider
+                .settings_config
+                .get("config")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            write_grok_live(cfg, backup)
         }
         other => Err(format!("未知应用: {other}")),
     }
@@ -329,6 +390,11 @@ pub fn backfill(app: &str, provider: &mut Provider) {
                         cfg
                     }),
                 );
+            }
+        }
+        "grok" => {
+            if let Some(cfg) = read_grok_live() {
+                obj.insert("config".into(), Value::String(cfg));
             }
         }
         _ => {}
@@ -416,6 +482,31 @@ pub fn import_codex() -> Option<Provider> {
     })
 }
 
+/// 读取当前 `~/.grok/config.toml`，若存在有效 models_base_url 则生成一个 Provider。
+/// 返回 None 表示无可导入内容（文件缺失 / 无 base_url）。
+pub fn import_grok() -> Option<Provider> {
+    let cfg = read_grok_live()?;
+    if cfg.trim().is_empty() {
+        return None;
+    }
+    // 从 [endpoints] 抓 models_base_url 做命名；无 base_url 视为无意义配置。
+    let base = cfg
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("models_base_url"))
+        .and_then(|r| r.split('"').nth(1))
+        .map(|s| s.to_string())
+        .filter(|value| !value.trim().is_empty())?;
+    let name = host_of(&base).unwrap_or_else(|| "导入的 Grok 供应商".to_string());
+    Some(Provider {
+        id: "imported-current".to_string(),
+        name,
+        category: Some("imported".into()),
+        settings_config: serde_json::json!({ "config": cfg }),
+        meta: serde_json::json!({ "imported": true }),
+        failover: serde_json::json!({ "enabled": false }),
+    })
+}
+
 #[cfg(test)]
 mod official_config_tests {
     use super::*;
@@ -450,5 +541,122 @@ command = "docs"
         assert!(output.get("ANTHROPIC_BASE_URL").is_none());
         assert!(output.get("ANTHROPIC_AUTH_TOKEN").is_none());
         assert_eq!(output["API_TIMEOUT_MS"], "600000");
+    }
+}
+
+#[cfg(test)]
+mod official_baseline_tests {
+    use super::*;
+    use std::sync::MutexGuard;
+
+    struct TestHome {
+        path: std::path::PathBuf,
+        previous: Option<std::ffi::OsString>,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl TestHome {
+        fn new() -> Self {
+            let lock = config::TEST_HOME_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let path = std::env::temp_dir().join(format!(
+                "z-switch-official-baseline-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ));
+            fs::create_dir_all(&path).unwrap();
+            let previous = std::env::var_os("Z_SWITCH_TEST_HOME");
+            std::env::set_var("Z_SWITCH_TEST_HOME", &path);
+            Self {
+                path,
+                previous,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for TestHome {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var("Z_SWITCH_TEST_HOME", value),
+                None => std::env::remove_var("Z_SWITCH_TEST_HOME"),
+            }
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn official_baseline_rewrites_corrupt_claude_settings() {
+        let _home = TestHome::new();
+        let path = config::get_claude_settings_path();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"{not-json").unwrap();
+
+        write_official_baseline("claude", true).unwrap();
+
+        let restored: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(restored.get("env").and_then(Value::as_object).is_some());
+        assert!(restored["env"].get("ANTHROPIC_BASE_URL").is_none());
+    }
+
+    #[test]
+    fn official_baseline_keeps_non_relay_fields_when_claude_parseable() {
+        let _home = TestHome::new();
+        let path = config::get_claude_settings_path();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            br#"{"env":{"ANTHROPIC_BASE_URL":"https://relay","API_TIMEOUT_MS":"1"},"keep":true}"#,
+        )
+        .unwrap();
+
+        write_official_baseline("claude", false).unwrap();
+
+        let restored: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(restored["keep"], true);
+        assert!(restored["env"].get("ANTHROPIC_BASE_URL").is_none());
+        assert_eq!(restored["env"]["API_TIMEOUT_MS"], "1");
+    }
+
+    #[test]
+    fn grok_write_live_and_import_round_trip() {
+        let _home = TestHome::new();
+        let toml = "[endpoints]\nmodels_base_url = \"https://relay.example/v1\"\n\n\
+                    [model.\"grok-4.5\"]\nmodel = \"grok-4.5\"\napi_key = \"sk-test\"\n";
+        let provider = Provider {
+            id: "relay".into(),
+            name: "Relay".into(),
+            category: Some("custom".into()),
+            settings_config: serde_json::json!({ "config": toml }),
+            meta: serde_json::json!({}),
+            failover: serde_json::json!({}),
+        };
+
+        // 写 live → ~/.grok/config.toml 内容与 settings_config.config 一致。
+        write_live("grok", &provider, false).unwrap();
+        let on_disk = fs::read_to_string(config::get_grok_config_path()).unwrap();
+        assert_eq!(on_disk, toml);
+
+        // 反向导入 → 从 models_base_url 生成一张可用的候选卡。
+        let imported = import_grok().expect("应能从现有 grok 配置导入");
+        assert_eq!(
+            imported.settings_config.get("config").and_then(Value::as_str),
+            Some(toml)
+        );
+        assert_eq!(imported.name, "relay.example");
+    }
+
+    #[test]
+    fn grok_import_skips_config_without_base_url() {
+        let _home = TestHome::new();
+        let path = config::get_grok_config_path();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // 无 models_base_url = 无意义配置，不应导入。
+        fs::write(&path, b"[models]\ndefault = \"grok-4.5\"\n").unwrap();
+        assert!(import_grok().is_none());
     }
 }

@@ -14,6 +14,13 @@ struct Manifest {
     claude_settings_existed: bool,
     codex_auth_existed: bool,
     codex_config_existed: bool,
+    /// 老 manifest 无此字段 → 反序列化默认 false（视为首启时无 grok 配置）。
+    #[serde(default)]
+    grok_config_existed: bool,
+    /// 是否已处理过 grok 快照。用于区分「老 manifest（grok 支持之前生成）」
+    /// 与「首启时确实没有 grok 配置」——前者需要升级补采，后者不需要。
+    #[serde(default)]
+    grok_captured: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -23,6 +30,7 @@ pub struct OriginalConfigStatus {
     pub captured_at: Option<u64>,
     pub claude_had_config: bool,
     pub codex_had_config: bool,
+    pub grok_had_config: bool,
 }
 
 fn dir() -> PathBuf {
@@ -63,6 +71,7 @@ fn to_status(manifest: &Manifest) -> OriginalConfigStatus {
         captured_at: Some(manifest.captured_at),
         claude_had_config: manifest.claude_settings_existed,
         codex_had_config: manifest.codex_auth_existed || manifest.codex_config_existed,
+        grok_had_config: manifest.grok_config_existed,
     }
 }
 
@@ -82,9 +91,28 @@ pub fn capture_once() -> Result<bool, String> {
         )?,
         codex_auth_existed: capture_file(&config::get_codex_auth_path(), "codex-auth.json")?,
         codex_config_existed: capture_file(&config::get_codex_config_path(), "codex-config.toml")?,
+        grok_config_existed: capture_file(&config::get_grok_config_path(), "grok-config.toml")?,
+        grok_captured: true,
     };
     config::write_json_file(&manifest_path(), &manifest)?;
     Ok(true)
+}
+
+/// 升级补采：老装机的 manifest 早在 grok 支持之前生成，不含 grok 快照。
+/// 在 grok 首次被 z-switch 覆盖前，把当前 ~/.grok/config.toml 收进原始快照，
+/// 作为该客户端的恢复基线。只做一次（grok_captured 标志），且只在 manifest 已存在时
+/// （全新安装由 capture_once 一次性处理，会直接把 grok_captured 置 true）。
+pub fn capture_grok_if_missing() -> Result<(), String> {
+    let Ok(mut manifest) = load_manifest() else {
+        return Ok(()); // 无 manifest：留给 capture_once 处理
+    };
+    if manifest.grok_captured {
+        return Ok(());
+    }
+    manifest.grok_config_existed =
+        capture_file(&config::get_grok_config_path(), "grok-config.toml")?;
+    manifest.grok_captured = true;
+    config::write_json_file(&manifest_path(), &manifest)
 }
 
 pub fn status() -> OriginalConfigStatus {
@@ -95,6 +123,7 @@ pub fn status() -> OriginalConfigStatus {
             captured_at: None,
             claude_had_config: false,
             codex_had_config: false,
+            grok_had_config: false,
         },
     }
 }
@@ -147,6 +176,11 @@ pub fn restore_app(app: &str) -> Result<(), String> {
             }
             Ok(())
         }
+        "grok" => apply_file(
+            &config::get_grok_config_path(),
+            "grok-config.toml",
+            manifest.grok_config_existed,
+        ),
         other => Err(format!("未知应用: {other}")),
     }
 }
@@ -226,5 +260,40 @@ mod tests {
         );
         assert!(!codex_auth.exists());
         assert!(!codex_config.exists());
+    }
+
+    #[test]
+    fn grok_backfill_captures_existing_config_from_old_manifest() {
+        let _home = TestHome::new();
+        // 模拟老装机：manifest 早于 grok 支持生成，不含 grok 字段。
+        let dir = dir();
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            manifest_path(),
+            br#"{"version":1,"capturedAt":1,"claudeSettingsExisted":false,
+                 "codexAuthExisted":false,"codexConfigExisted":false}"#,
+        )
+        .unwrap();
+        assert!(!status().grok_had_config);
+
+        // 用户本机已有 grok 配置 → 升级补采应把它收进快照并标记已处理。
+        let grok_path = config::get_grok_config_path();
+        fs::create_dir_all(grok_path.parent().unwrap()).unwrap();
+        fs::write(&grok_path, b"[endpoints]\nmodels_base_url = \"https://x/v1\"\n").unwrap();
+
+        capture_grok_if_missing().unwrap();
+        assert!(status().grok_had_config);
+
+        // 二次调用应幂等（已 captured，不再重采）：删掉现有文件后仍报已保存。
+        fs::remove_file(&grok_path).unwrap();
+        capture_grok_if_missing().unwrap();
+        assert!(status().grok_had_config);
+
+        // 恢复应写回补采时的快照内容。
+        restore_app("grok").unwrap();
+        assert_eq!(
+            fs::read_to_string(&grok_path).unwrap(),
+            "[endpoints]\nmodels_base_url = \"https://x/v1\"\n"
+        );
     }
 }

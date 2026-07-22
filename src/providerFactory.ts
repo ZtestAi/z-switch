@@ -29,6 +29,17 @@ export interface CodexProviderInput {
   contextWindow?: number;
 }
 
+export interface GrokProviderInput {
+  id: string;
+  name: string;
+  category: string;
+  /** 写进 [endpoints].models_base_url */
+  baseUrl: string;
+  model: string;
+  contextWindow?: number;
+  apiBackend?: "responses" | "chat";
+}
+
 export function inferWireApi(baseUrl: string): "responses" | "chat" | null {
   const url = baseUrl.toLowerCase();
   if (!url) return null;
@@ -175,5 +186,44 @@ export function buildCodexProvider(
       config: lines.join("\n") + "\n",
     },
     meta: { wireApi: input.wireApi },
+  };
+}
+
+/**
+ * 生成 Grok 客户端的 ~/.grok/config.toml（单文件、单模型）。
+ * 结构：[models] default/web_search → [endpoints] models_base_url → [model."<id>"]。
+ * api_key 直接内嵌在 TOML 里（Grok 无独立 auth 文件），全份文本存 settingsConfig.config。
+ */
+export function buildGrokProvider(
+  input: GrokProviderInput,
+  apiKey: string,
+): Provider {
+  const modelId = input.model.trim() || "grok-4.5";
+  const lines = [
+    "[models]",
+    `default = ${tomlString(modelId)}`,
+    `web_search = ${tomlString(modelId)}`,
+    "",
+    "[endpoints]",
+    `models_base_url = ${tomlString(input.baseUrl)}`,
+    "",
+    `[model.${tomlString(modelId)}]`,
+    `model = ${tomlString(modelId)}`,
+    `name = ${tomlString(input.name)}`,
+    `description = ${tomlString(input.name)}`,
+    `api_key = ${tomlString(apiKey)}`,
+    `api_backend = ${tomlString(input.apiBackend ?? "responses")}`,
+  ];
+  // context_window 始终写入：缺省内置 500000（Grok 4.5 上下文），不留空。
+  const contextWindow =
+    input.contextWindow && input.contextWindow > 0 ? input.contextWindow : 500000;
+  lines.push(`context_window = ${contextWindow}`);
+
+  return {
+    id: input.id,
+    name: input.name,
+    category: input.category,
+    settingsConfig: { config: lines.join("\n") + "\n" },
+    meta: {},
   };
 }

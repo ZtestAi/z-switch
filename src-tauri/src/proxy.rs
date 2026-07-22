@@ -9,7 +9,7 @@
 //! 纪律：不改 body、不做格式转换、不碰 key 内容、不上传。纯本地邮差。
 //! 唯一的例外是「本地活跃度计数」：只统计**事件次数**（在途请求数 / 累计转发数 /
 //! 最后活跃时间），用于界面显示「正在使用」。绝不触碰请求体或 key，绝不出本机。
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -143,28 +143,70 @@ pub struct ProxyTargets {
 /// 用 std RwLock：handler 读时先取值再 drop guard，绝不跨 await 持有。
 pub type SharedTargets = Arc<RwLock<ProxyTargets>>;
 
-/// 轻量句柄：同步/异步两处都能廉价读到「是否在跑 + 当前 targets + 端口」，
-/// 无需触碰起停用的 async 锁。存进 Tauri managed state。
+/// 单个客户端的本地活跃度计数句柄（仅事件次数，不碰内容、不上传）。
 #[derive(Clone)]
-pub struct ProxyHandle {
-    pub targets: SharedTargets,
-    pub running: Arc<AtomicBool>,
-    pub port: Arc<std::sync::atomic::AtomicU16>,
-    /// 本地活跃度计数（仅事件次数，不碰内容、不上传）。
+pub struct AppCounters {
     pub in_flight: Arc<AtomicU32>,
     pub total: Arc<AtomicU64>,
     pub last_activity_ms: Arc<AtomicU64>,
 }
 
+impl Default for AppCounters {
+    fn default() -> Self {
+        Self {
+            in_flight: Arc::new(AtomicU32::new(0)),
+            total: Arc::new(AtomicU64::new(0)),
+            last_activity_ms: Arc::new(AtomicU64::new(0)),
+        }
+    }
+}
+
+impl AppCounters {
+    pub fn in_flight(&self) -> u32 {
+        self.in_flight.load(Ordering::Relaxed)
+    }
+    pub fn total(&self) -> u64 {
+        self.total.load(Ordering::Relaxed)
+    }
+    pub fn last_activity_ms(&self) -> u64 {
+        self.last_activity_ms.load(Ordering::Relaxed)
+    }
+    fn reset(&self) {
+        self.in_flight.store(0, Ordering::Relaxed);
+        self.total.store(0, Ordering::Relaxed);
+        self.last_activity_ms.store(0, Ordering::Relaxed);
+    }
+}
+
+/// 支持本地路由的客户端集合（用于初始化每客户端计数）。
+pub const PROXY_APPS: &[&str] = &["claude", "codex"];
+
+/// 轻量句柄：同步/异步两处都能廉价读到「是否在跑 + 当前 targets + 端口 + 每客户端路由/计数」，
+/// 无需触碰起停用的 async 锁。存进 Tauri managed state。
+#[derive(Clone)]
+pub struct ProxyHandle {
+    pub targets: SharedTargets,
+    /// 服务级：localhost 服务是否在运行（任一客户端开启即运行）。
+    pub running: Arc<AtomicBool>,
+    pub port: Arc<std::sync::atomic::AtomicU16>,
+    /// 每客户端是否正在路由（服务级 running 之下的分客户端开关）。
+    pub routed: Arc<RwLock<HashSet<String>>>,
+    /// 每客户端本地活跃度计数。
+    pub counters: HashMap<String, AppCounters>,
+}
+
 impl Default for ProxyHandle {
     fn default() -> Self {
+        let mut counters = HashMap::new();
+        for app in PROXY_APPS {
+            counters.insert((*app).to_string(), AppCounters::default());
+        }
         Self {
             targets: Arc::new(RwLock::new(ProxyTargets::default())),
             running: Arc::new(AtomicBool::new(false)),
             port: Arc::new(std::sync::atomic::AtomicU16::new(DEFAULT_PORT)),
-            in_flight: Arc::new(AtomicU32::new(0)),
-            total: Arc::new(AtomicU64::new(0)),
-            last_activity_ms: Arc::new(AtomicU64::new(0)),
+            routed: Arc::new(RwLock::new(HashSet::new())),
+            counters,
         }
     }
 }
@@ -176,20 +218,32 @@ impl ProxyHandle {
     pub fn current_port(&self) -> u16 {
         self.port.load(Ordering::SeqCst)
     }
-    pub fn in_flight(&self) -> u32 {
-        self.in_flight.load(Ordering::Relaxed)
+    /// 某客户端是否正在路由。
+    pub fn is_routed(&self, app: &str) -> bool {
+        self.routed.read().map(|s| s.contains(app)).unwrap_or(false)
     }
-    pub fn total(&self) -> u64 {
-        self.total.load(Ordering::Relaxed)
+    /// 设置某客户端的路由开关。
+    pub fn set_routed(&self, app: &str, on: bool) {
+        if let Ok(mut s) = self.routed.write() {
+            if on {
+                s.insert(app.to_string());
+            } else {
+                s.remove(app);
+            }
+        }
     }
-    pub fn last_activity_ms(&self) -> u64 {
-        self.last_activity_ms.load(Ordering::Relaxed)
+    /// 当前有多少客户端在路由（用于决定是否停服务）。
+    pub fn routed_count(&self) -> usize {
+        self.routed.read().map(|s| s.len()).unwrap_or(0)
+    }
+    pub fn counters(&self, app: &str) -> Option<&AppCounters> {
+        self.counters.get(app)
     }
     /// 起新会话时清零累计计数（在途归零、频率从 0 起算）。
     pub fn reset_counters(&self) {
-        self.in_flight.store(0, Ordering::Relaxed);
-        self.total.store(0, Ordering::Relaxed);
-        self.last_activity_ms.store(0, Ordering::Relaxed);
+        for counter in self.counters.values() {
+            counter.reset();
+        }
     }
 }
 
@@ -199,18 +253,18 @@ struct Runtime {
     targets: SharedTargets,
     config: ProxyRuntimeConfig,
     error_log_lock: tokio::sync::Mutex<()>,
-    /// 本地活跃度计数句柄（与 managed ProxyHandle 共享同一 Arc）。
-    in_flight: Arc<AtomicU32>,
-    total: Arc<AtomicU64>,
-    last_activity_ms: Arc<AtomicU64>,
+    /// 每客户端活跃度计数句柄（与 managed ProxyHandle 共享同一批 Arc）。
+    counters: HashMap<String, AppCounters>,
 }
 
-/// RAII 守卫：进入 handler 时 in_flight+1，离开（任何路径：正常/错误/超时/流中断）时 -1。
-struct InFlightGuard(Arc<AtomicU32>);
+/// RAII 守卫：进入 handler 时对应客户端 in_flight+1，离开（任何路径：正常/错误/超时/流中断）时 -1。
+struct InFlightGuard(Option<Arc<AtomicU32>>);
 
 impl Drop for InFlightGuard {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::Relaxed);
+        if let Some(counter) = &self.0 {
+            counter.fetch_sub(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -258,9 +312,7 @@ impl ProxyControl {
             targets: self.handle.targets.clone(),
             config,
             error_log_lock: tokio::sync::Mutex::new(()),
-            in_flight: self.handle.in_flight.clone(),
-            total: self.handle.total.clone(),
-            last_activity_ms: self.handle.last_activity_ms.clone(),
+            counters: self.handle.counters.clone(),
         });
 
         let app = Router::new()
@@ -373,13 +425,6 @@ async fn forward(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, (StatusCode, String)> {
-    // 本地活跃度计数：进入 handler 即 +1 并记活跃时间；guard 在函数/流结束时 -1。
-    // 只数事件，不读 body、不看 key。
-    rt.total.fetch_add(1, Ordering::Relaxed);
-    rt.last_activity_ms.store(now_ms(), Ordering::Relaxed);
-    rt.in_flight.fetch_add(1, Ordering::Relaxed);
-    let in_flight_guard = InFlightGuard(rt.in_flight.clone());
-
     // 路径形如 /claude/v1/messages → app=claude, rest=/v1/messages
     let path = uri.path();
     let trimmed = path.trim_start_matches('/');
@@ -387,6 +432,16 @@ async fn forward(
         Some((a, r)) => (a.to_string(), format!("/{r}")),
         None => (trimmed.to_string(), String::new()),
     };
+
+    // 本地活跃度计数（按客户端）：进入 handler 即 +1 并记活跃时间；guard 在函数/流结束时 -1。
+    // 只数事件，不读 body、不看 key。
+    let app_counters = rt.counters.get(&app).cloned();
+    if let Some(counter) = &app_counters {
+        counter.total.fetch_add(1, Ordering::Relaxed);
+        counter.last_activity_ms.store(now_ms(), Ordering::Relaxed);
+        counter.in_flight.fetch_add(1, Ordering::Relaxed);
+    }
+    let in_flight_guard = InFlightGuard(app_counters.as_ref().map(|c| c.in_flight.clone()));
 
     let target = {
         let guard = rt.targets.read().unwrap();

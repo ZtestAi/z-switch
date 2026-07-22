@@ -48,11 +48,33 @@ export const fetchModels = (baseUrl: string, apiKey: string, modelsUrl?: string)
 /** 从现有 ~/.claude、~/.codex 反向导入为供应商 */
 export const importLive = () => invoke<Root>("import_live");
 
+/** cc-switch 导入候选（未分配 z-switch id） */
+export interface CcswitchProvider {
+  app: AppType;
+  name: string;
+  settingsConfig: Record<string, unknown>;
+  meta?: Record<string, unknown>;
+}
+
+export interface CcswitchScan {
+  /** 数据来源：SQLite 库 / 旧版 JSON / 未找到 */
+  source: "sqlite" | "json" | "none";
+  providers: CcswitchProvider[];
+}
+
+/** 扫描 ~/.cc-switch（SQLite 优先、config.json 回退），返回可导入的 claude/codex 供应商 */
+export const scanCcswitch = () => invoke<CcswitchScan>("scan_ccswitch");
+
+/** 导入用户勾选的 cc-switch 供应商（追加，不改变当前生效项） */
+export const importCcswitch = (selected: CcswitchProvider[]) =>
+  invoke<Root>("import_ccswitch", { selected });
+
 export interface OriginalConfigStatus {
   captured: boolean;
   capturedAt: number | null;
   claudeHadConfig: boolean;
   codexHadConfig: boolean;
+  grokHadConfig: boolean;
 }
 
 /** 首次保存的本机原始配置状态 */
@@ -62,8 +84,8 @@ export const originalConfigStatus = () =>
 /** 创建并使用系统文件管理器打开 ~/.z-switch/backups */
 export const openBackupsFolder = () => invoke<void>("open_backups_folder");
 
-/** 打开指定配置文件所在目录：claude=~/.claude、codex=~/.codex、app=~/.z-switch */
-export const openConfigDir = (kind: "claude" | "codex" | "app") =>
+/** 打开指定配置文件所在目录：claude=~/.claude、codex=~/.codex、grok=~/.grok、app=~/.z-switch */
+export const openConfigDir = (kind: "claude" | "codex" | "grok" | "app") =>
   invoke<void>("open_config_dir", { kind });
 
 /** 使用系统默认浏览器打开项目使用帮助 */
@@ -78,6 +100,10 @@ export const clearProxyErrorLog = () => invoke<void>("clear_proxy_error_log");
 /** 恢复指定应用的首次原始配置，并解除当前供应商关联 */
 export const restoreOriginal = (app: AppType) =>
   invoke<Root>("restore_original", { app });
+
+/** 一键写入干净的官方账号配置（抗损坏，不依赖首启快照） */
+export const restoreOfficialBaseline = (app: AppType) =>
+  invoke<Root>("restore_official_baseline", { app });
 
 export interface ConnResult {
   status: "ok" | "unauthorized" | "unreachable";
@@ -128,18 +154,50 @@ export function testStream(
 export const setAutoLaunch = (enabled: boolean) =>
   invoke<Root>("set_auto_launch", { enabled });
 
-export interface ProxyStatus {
-  enabled: boolean;
-  port: number;
-  /** 本地活跃度计数：仅事件次数，不碰请求内容、不上传 */
+/** 单个客户端的路由状态 + 本地活跃度计数（仅事件次数，不碰请求内容、不上传） */
+export interface AppRouteStatus {
+  routed: boolean;
   inFlight: number;
   total: number;
   lastActivityMs: number;
 }
 
-/** 查询本地热切换代理是否在跑 + 端口 + 本地活跃度计数 */
+export interface ProxyStatus {
+  /** localhost 服务是否运行（任一客户端开启即运行） */
+  running: boolean;
+  port: number;
+  claude: AppRouteStatus;
+  codex: AppRouteStatus;
+}
+
+/** 查询代理服务是否在跑 + 端口 + 每客户端路由与本地活跃度计数 */
 export const proxyStatus = () => invoke<ProxyStatus>("proxy_status");
 
-/** 开启/关闭本地热切换代理（开=起服务并把 live 指向 localhost；关=恢复直连） */
-export const setProxyEnabled = (enabled: boolean) =>
-  invoke<Root>("set_proxy_enabled", { enabled });
+/** 开启/关闭「某个客户端」的本地热切换路由（分客户端，不再整体一刀切） */
+export const setAppRouting = (app: AppType, enabled: boolean) =>
+  invoke<Root>("set_app_routing", { app, enabled });
+
+/** 单个客户端的环境体检结果 */
+export interface AppDiagnosis {
+  app: AppType;
+  routed: boolean;
+  liveBaseUrl: string | null;
+  localhostResidue: boolean;
+  placeholderKey: boolean;
+  currentName: string | null;
+  healthy: boolean;
+  issue: string | null;
+  fixable: boolean;
+}
+
+export interface EnvDiagnosis {
+  proxyRunning: boolean;
+  apps: AppDiagnosis[];
+}
+
+/** 环境体检：检查 live 是否残留本地代理占位（base_url 指向 127.0.0.1 / 占位密钥） */
+export const environmentDiagnose = () => invoke<EnvDiagnosis>("environment_diagnose");
+
+/** 一键修复某客户端：备份后重写为直连当前供应商（无当前项则恢复原始快照） */
+export const environmentRepair = (app: AppType) =>
+  invoke<Root>("environment_repair", { app });

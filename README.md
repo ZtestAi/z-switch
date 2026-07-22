@@ -4,9 +4,9 @@
 
 # z-switch
 
-**面向 Claude Code 与 Codex 的桌面供应商一键切换器 —— 直连原子改写或本地代理热切换**
+**面向 Claude Code、Codex 与 Grok 的桌面供应商一键切换器 —— 直连原子改写或本地代理热切换**
 
-One-click desktop provider switcher for Claude Code &amp; Codex — atomic direct-write or live hot-swap.
+One-click desktop provider switcher for Claude Code, Codex &amp; Grok — atomic direct-write or live hot-swap.
 
 由 真测 Ztest · [ztest.ai](https://ztest.ai) 出品 · 开源 · 无广告 · 无返利链接 · inspired by [cc-switch](https://github.com/farion1231/cc-switch)
 
@@ -28,7 +28,7 @@ One-click desktop provider switcher for Claude Code &amp; Codex — atomic direc
 
 ## 简介
 
-**z-switch** 让你在多个 API 中转站 / 官方账号之间，为 Claude Code 和 Codex 快速切换供应商。
+**z-switch** 让你在多个 API 中转站 / 官方账号之间，为 Claude Code、Codex 和 Grok 快速切换供应商。
 
 它提供两种工作方式：
 
@@ -65,15 +65,16 @@ One-click desktop provider switcher for Claude Code &amp; Codex — atomic direc
 
 | 分类 | 能力 |
 | --- | --- |
-| **供应商管理** | Claude Code / Codex 分区管理、一键切换；自定义供应商的添加、复制、编辑、删除；表单与 JSON 两种编辑方式 |
-| **开箱即用** | 内置 Claude / OpenAI 官方账号卡片，可与任意 API 中转站来回切换；首次启动自动保留并导入已有的 `~/.claude` / `~/.codex` 配置 |
-| **多档模型** | Claude 支持主模型与 Haiku / Sonnet / Opus / Fable 四档独立配置，Sonnet / Opus / Fable 可勾选 **1M 长上下文**；Codex 可选 `responses` 或 `chat` 协议 |
+| **供应商管理** | Claude Code / Codex / Grok 分区管理、一键切换；自定义供应商的添加、复制、编辑、删除；表单与 JSON 两种编辑方式 |
+| **开箱即用** | 内置 Claude / OpenAI 官方账号卡片，可与任意 API 中转站来回切换；首次启动自动保留并导入已有的 `~/.claude` / `~/.codex` / `~/.grok` 配置 |
+| **多档模型** | Claude 支持主模型与 Haiku / Sonnet / Opus / Fable 四档独立配置，Sonnet / Opus / Fable 可勾选 **1M 长上下文**；Codex 可选 `responses` 或 `chat` 协议；Grok 单模型 + `context_window`（默认 500000） |
 | **供应商体检** | Base URL 智能推断、连通性测试、模型列表拉取、**HTTP 层测速**，以及发送最小流式 `Hi` 的**真实调用测试**（显示首字耗时与总耗时） |
-| **Claude 生态联动** | 切换可同步到 **Claude 桌面版**（独立聊天 App，写 3p 网关配置）与 **VS Code Claude Code 扩展**；可选跳过 Claude Code 初次安装确认；一键打开 Claude / Codex / z-switch 配置目录 |
+| **迁移与自检** | 从 **cc-switch 一键导入**（SQLite 优先、config.json 回退）；**环境自检与修复**（清理 live 里残留的本地代理占位）；一键**重置为官方账号基线**（抗损坏，写前备份） |
+| **Claude 生态联动** | 切换可同步到 **Claude 桌面版**（独立聊天 App，写 3p 网关配置）与 **VS Code Claude Code 扩展**；可选跳过 Claude Code 初次安装确认；一键打开 Claude / Codex / Grok / z-switch 配置目录 |
 | **配置安全** | 独立原始快照、一键恢复、原子写入、写前备份、Codex 双文件回滚、切换前 backfill，避免手工改动丢失 |
-| **系统集成** | 系统托盘、单实例、窗口状态记忆、开机自启、深链 `zswitch://import`（带确认弹窗、防覆盖）；关闭 / Alt+F4 最小化到托盘，托盘菜单「退出」才结束进程 |
-| **外观** | 浅色 / 深色 / 跟随系统主题 |
-| **本地代理（实验）** | `localhost` 转发请求与流式响应，运行期间热切换目标，附超时 / 连接池 / 请求体上限 / 脱敏错误日志 |
+| **系统集成** | 系统托盘、单实例、窗口状态记忆、开机自启、深链 `zswitch://import` / `ccswitch://`（带确认弹窗、防覆盖）；关闭 / Alt+F4 最小化到托盘，托盘菜单「退出」才结束进程 |
+| **界面** | 左侧栏桌面式布局、可拖拽调宽侧栏、应用内设置分区页；浅色 / 深色 / 跟随系统主题 |
+| **本地代理（实验）** | `localhost` 转发请求与流式响应，运行期间热切换目标，**Claude / Codex 分客户端独立开关** + 本地活跃度显示，附超时 / 连接池 / 请求体上限 / 脱敏错误日志 |
 
 ---
 
@@ -144,6 +145,7 @@ One-click desktop provider switcher for Claude Code &amp; Codex — atomic direc
 
 - **Claude** — 合并写入 `~/.claude/settings.json` 的 `env`，保留其他顶层字段。
 - **Codex** — 写入 `~/.codex/auth.json` 与 `~/.codex/config.toml`；第二个文件写入失败时回滚 `auth`。
+- **Grok** — 整文件写入 `~/.grok/config.toml`（单文件 TOML，纯第三方、无官方卡）；升级 / 首启会自动把现有配置采纳成一张卡，切换前 backfill + 写前备份 + 原始快照三重兜底。
 - **官方账号卡片不保存 API Key** — Claude 清除中转环境变量、改用客户端本机登录；Codex 切走前保存客户端刷新后的登录态，切回时恢复。
 - **切换前 backfill** — 把当前 live 配置回填到旧供应商，避免手工修改丢失。
 - **安全删除** — 删除正在使用的供应商时，可选择恢复首次原始配置，或保留电脑当前配置、仅解除 z-switch 管理。
@@ -186,6 +188,7 @@ One-click desktop provider switcher for Claude Code &amp; Codex — atomic direc
 | `~/.claude.json` | Claude Code 根配置（`hasCompletedOnboarding`，开启「跳过初次确认」时写入） |
 | `%LOCALAPPDATA%\Claude`、`Claude-3p`（mac 为 `~/Library/Application Support/…`） | Claude 桌面版配置（开启「桌面版随切换」时写 3p 网关 profile） |
 | `~/.codex/auth.json`、`~/.codex/config.toml` | Codex 客户端配置（直连模式写入） |
+| `~/.grok/config.toml` | Grok 客户端配置（直连模式整文件写入，单文件 TOML） |
 | `~/.z-switch/original/` | 首次运行保存的**原始配置快照**，可随时恢复 |
 | `~/.z-switch/backups/` | 每次写入前的时间戳备份 |
 | `~/.z-switch/logs/proxy-errors.jsonl` | 本地代理的脱敏错误日志（按大小轮转） |
@@ -239,18 +242,21 @@ npm run tauri build -- --no-bundle
 
 ```text
 src/                        前端（React 19 + TypeScript）
-  App.tsx                   主界面、切换、深链和状态同步
+  App.tsx                   主界面（左侧栏布局）、切换、深链和状态同步
   ProviderModal.tsx         供应商表单、连通性、密钥和模型选择
-  SettingsModal.tsx         主题、自启、本地路由等设置
-  providerFactory.ts        Provider 构建器和地址推断规则
+  SettingsModal.tsx         主题、自启、分客户端路由、恢复与迁移等设置
+  CcswitchImportModal.tsx   从 cc-switch 扫描并勾选导入
+  providerFactory.ts        Provider 构建器（Claude/Codex/Grok）和地址推断规则
   api.ts / types.ts         Tauri 命令封装与前端类型
 
 src-tauri/src/              后端（Rust + Tauri 2）
   lib.rs                    Tauri 命令、状态和切换流程
   config.rs                 路径与原子写入
   store.rs                  providers.json 数据模型
-  live.rs                   Claude/Codex live 配置读写
-  proxy.rs                  本地代理和热切换目标
+  live.rs                   Claude/Codex/Grok live 配置读写
+  proxy.rs                  本地代理和分客户端热切换目标
+  ccswitch.rs               从 cc-switch 导入（SQLite 优先、config.json 回退）
+  repair.rs                 环境自检：检测 live 里的本地代理占位残留
   claude_ext.rs             VS Code 扩展放行 + 跳过初次确认
   claude_desktop.rs         Claude 桌面版 3p 网关配置写盘
   connectivity.rs           HTTP 连通性检查与测速

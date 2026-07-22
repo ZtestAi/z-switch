@@ -4,6 +4,7 @@ import { fetchModels, speedtest, testConnectivity } from "./api";
 import {
   buildClaudeProvider,
   buildCodexProvider,
+  buildGrokProvider,
   DEFAULT_CODEX_WIRE_API,
   inferWireApi,
   inferClaudeKeyField,
@@ -123,13 +124,18 @@ export default function ProviderModal({ app, initial, existingIds, onClose, onSa
   const [name, setName] = useState(initial?.name ?? "");
   const [baseUrl, setBaseUrl] = useState(
     initEnv.ANTHROPIC_BASE_URL ??
-      (initConfigText ? initConfigText.match(/base_url\s*=\s*"([^"]+)"/)?.[1] ?? "" : ""),
+      (initConfigText
+        ? initConfigText.match(/(?:models_base_url|base_url)\s*=\s*"([^"]+)"/)?.[1] ?? ""
+        : ""),
   );
   const [keyField, setKeyField] = useState<"ANTHROPIC_AUTH_TOKEN" | "ANTHROPIC_API_KEY">(
     (initial?.meta as any)?.apiKeyField ?? (initEnv.ANTHROPIC_API_KEY != null ? "ANTHROPIC_API_KEY" : "ANTHROPIC_AUTH_TOKEN"),
   );
   const [apiKey, setApiKey] = useState(
-    initEnv.ANTHROPIC_AUTH_TOKEN ?? initEnv.ANTHROPIC_API_KEY ?? initCfg.auth?.OPENAI_API_KEY ?? "",
+    initEnv.ANTHROPIC_AUTH_TOKEN ??
+      initEnv.ANTHROPIC_API_KEY ??
+      initCfg.auth?.OPENAI_API_KEY ??
+      (initConfigText ? initConfigText.match(/api_key\s*=\s*"([^"]+)"/)?.[1] ?? "" : ""),
   );
   const [model, setModel] = useState(
     initEnv.ANTHROPIC_MODEL ??
@@ -170,7 +176,8 @@ export default function ProviderModal({ app, initial, existingIds, onClose, onSa
     initConfigText ? /requires_openai_auth\s*=\s*true/.test(initConfigText) : false,
   );
   const [ctxWindow, setCtxWindow] = useState(
-    initConfigText.match(/model_context_window\s*=\s*(\d+)/)?.[1] ?? "",
+    initConfigText.match(/(?:model_context_window|context_window)\s*=\s*(\d+)/)?.[1] ??
+      (app === "grok" ? "500000" : ""),
   );
 
   const [showAdv, setShowAdv] = useState(false);
@@ -207,6 +214,12 @@ export default function ProviderModal({ app, initial, existingIds, onClose, onSa
         setInferHint(null);
       }
       setV1Hint(needsV1Suffix(v)); // Codex 疑似缺 /v1 → 非阻断提醒
+      return;
+    }
+    if (app === "grok") {
+      // Grok 无 wire_api / key 字段推断，但地址同样需以 /v1 结尾 → 复用缺 /v1 提醒。
+      setInferHint(null);
+      setV1Hint(needsV1Suffix(v));
       return;
     }
     setV1Hint(false);
@@ -397,6 +410,18 @@ export default function ProviderModal({ app, initial, existingIds, onClose, onSa
         { id, name: name.trim(), category: initial?.category ?? "custom", baseUrl, apiKeyField: keyField, model, haiku, sonnet, opus, fable, extraEnv },
         apiKey,
       );
+    } else if (app === "grok") {
+      provider = buildGrokProvider(
+        {
+          id,
+          name: name.trim(),
+          category: initial?.category ?? "custom",
+          baseUrl,
+          model,
+          contextWindow: ctxWindow.trim() ? Number(ctxWindow.trim()) : undefined,
+        },
+        apiKey,
+      );
     } else {
       provider = buildCodexProvider(
         {
@@ -421,7 +446,7 @@ export default function ProviderModal({ app, initial, existingIds, onClose, onSa
     <div className="overlay" onMouseDown={onClose}>
       <div className="modal provider-modal" onMouseDown={(e) => e.stopPropagation()}>
         <div className="modal-head">
-          <h3>{editing ? "编辑供应商" : "添加供应商"} · {app === "claude" ? "Claude Code" : "Codex"}</h3>
+          <h3>{editing ? "编辑供应商" : "添加供应商"} · {app === "claude" ? "Claude Code" : app === "grok" ? "Grok" : "Codex"}</h3>
           <button className="x" onClick={onClose} aria-label="关闭"><CloseIcon /></button>
         </div>
 
@@ -433,7 +458,7 @@ export default function ProviderModal({ app, initial, existingIds, onClose, onSa
 
           {jsonMode ? (
             <div className="field">
-              <label>settingsConfig（{app === "claude" ? "{ env }" : "{ auth, config }"}）</label>
+              <label>settingsConfig（{app === "claude" ? "{ env }" : app === "grok" ? "{ config }" : "{ auth, config }"}）</label>
               <textarea className="mono" value={jsonText} onChange={(e) => setJsonText(e.target.value)} style={{ minHeight: 220 }} />
               <div className="hint">保存时原子写入，切换时保留 settings.json 中你的其它字段。</div>
             </div>
@@ -453,7 +478,7 @@ export default function ProviderModal({ app, initial, existingIds, onClose, onSa
                 {v1Hint && (
                   <div className="hint inline-hint" style={{ color: "var(--warning)" }}>
                     <AlertIcon />
-                    Codex 供应商地址通常需以 /v1 结尾
+                    {app === "grok" ? "Grok" : "Codex"} 供应商地址通常需以 /v1 结尾
                     <button type="button" className="hint-action" onClick={applyV1Suffix}>点此补全</button>
                   </div>
                 )}
@@ -496,6 +521,25 @@ export default function ProviderModal({ app, initial, existingIds, onClose, onSa
                     {renderOneMRow("Sonnet", "默认主力模型", sonnet, setSonnet)}
                     {renderOneMRow("Opus", "最强 / 复杂任务模型", opus, setOpus)}
                     {renderOneMRow("Fable", "前沿 / 自主任务模型", fable, setFable)}
+                  </div>
+                </>
+              ) : app === "grok" ? (
+                <>
+                  <div className="field">
+                    <label>API Key（api_key）</label>
+                    <SecretInput value={apiKey} onChange={setApiKey} />
+                  </div>
+                  {renderTestTools()}
+                  <div className="field">
+                    <label>模型</label>
+                    <ModelPicker
+                      value={model}
+                      models={fetchedModels}
+                      ariaLabel="Grok 模型"
+                      placeholder="如 grok-4.5"
+                      onChange={setModel}
+                    />
+                    <div className="hint">写入 [models].default / web_search 与 [model."模型"] 表。</div>
                   </div>
                 </>
               ) : (
@@ -593,6 +637,15 @@ export default function ProviderModal({ app, initial, existingIds, onClose, onSa
                   <div className="field">
                     <label>model_context_window（可选）</label>
                     <input className="mono" value={ctxWindow} onChange={(e) => setCtxWindow(e.target.value)} placeholder="如 262144" />
+                  </div>
+                </div>
+              )}
+
+              {showAdv && app === "grok" && (
+                <div className="adv">
+                  <div className="field">
+                    <label>context_window（可选）</label>
+                    <input className="mono" value={ctxWindow} onChange={(e) => setCtxWindow(e.target.value)} placeholder="如 500000" />
                   </div>
                 </div>
               )}

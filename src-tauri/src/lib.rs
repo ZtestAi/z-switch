@@ -1,4 +1,5 @@
 //! z-switch 后端入口 + Tauri 命令。
+mod ccswitch;
 mod claude_desktop;
 mod claude_ext;
 mod config;
@@ -9,6 +10,7 @@ mod official;
 mod original;
 mod proxy;
 mod proxy_log;
+mod repair;
 mod store;
 mod stream_test;
 mod tray;
@@ -66,7 +68,7 @@ fn sync_claude_desktop_after_switch(
     }
     let result = if target_is_official {
         claude_desktop::restore_official()
-    } else if proxy_handle.map(|h| h.is_running()).unwrap_or(false) {
+    } else if proxy_handle.map(|h| h.is_routed("claude")).unwrap_or(false) {
         let handle = proxy_handle.expect("running proxy must have a handle");
         claude_desktop::apply_proxy(&proxy::local_base(handle.current_port(), "claude"))
     } else if let Some(p) = provider {
@@ -105,7 +107,7 @@ pub(crate) fn switch_in_place(
         return Err(format!("供应商不存在: {id}"));
     }
 
-    let proxy_on = proxy_handle.map(|h| h.is_running()).unwrap_or(false);
+    let proxy_on = proxy_handle.map(|h| h.is_routed(app)).unwrap_or(false);
     let target = data.providers.get(id).cloned().unwrap();
     let target_is_official = store::is_official_provider(&target);
     let current_id = data.current.clone();
@@ -205,7 +207,7 @@ fn save_provider(
     data.providers.insert(id, provider.clone());
     if is_current {
         let handle = app_handle.state::<proxy::ProxyHandle>();
-        if handle.is_running() {
+        if handle.is_routed(&app) {
             // 代理模式：更新内存 target（live 保持 localhost，不覆盖）
             if let Some(t) = proxy::target_from_provider(&app, &provider) {
                 proxy::set_target(&handle.targets, &app, t);
@@ -248,7 +250,7 @@ fn delete_provider(
         match active_mode.as_deref() {
             Some("keep") => {
                 // 代理模式的 live 文件指向 localhost；解除管理前必须写回真实地址。
-                if handle.is_running() {
+                if handle.is_routed(&app) {
                     let provider = current_provider
                         .as_ref()
                         .ok_or_else(|| "当前供应商不存在".to_string())?;
@@ -320,6 +322,7 @@ fn open_config_dir(kind: String) -> Result<(), String> {
     let path = match kind.as_str() {
         "claude" => config::get_home_dir().join(".claude"),
         "codex" => config::get_home_dir().join(".codex"),
+        "grok" => config::get_home_dir().join(".grok"),
         "app" => config::get_app_config_dir(),
         other => return Err(format!("未知配置目录：{other}")),
     };
@@ -426,6 +429,61 @@ fn restore_original(
     Ok(out)
 }
 
+/// 一键写入干净的官方账号配置（抗损坏）。
+/// 与「恢复原始配置」不同：不依赖首启快照，即使 settings.json / config.toml
+/// 在用 z-switch 之前就已损坏，也能强制重写为可启动的官方基线。
+#[tauri::command]
+fn restore_official_baseline(
+    app_handle: AppHandle,
+    state: State<AppState>,
+    app: String,
+) -> Result<Root, String> {
+    if !proxy::PROXY_APPS.contains(&app.as_str()) {
+        return Err(format!("未知应用: {app}"));
+    }
+    let handle = app_handle.state::<proxy::ProxyHandle>();
+    let official_id = store::official_provider_id(&app)
+        .ok_or_else(|| format!("未知应用: {app}"))?
+        .to_string();
+
+    let backup = {
+        let root = state.0.lock().unwrap();
+        backup_flag(&root)
+    };
+    live::write_official_baseline(&app, backup)?;
+
+    // 关掉路由并清代理目标，避免下次启动又把 live 指回 localhost。
+    handle.set_routed(&app, false);
+    proxy::clear_target(&handle.targets, &app);
+
+    let mut root = state.0.lock().unwrap();
+    set_app_routing_flag(&mut root, &app, false);
+    root.ensure_official_providers();
+    let data = root
+        .apps
+        .get_mut(&app)
+        .ok_or_else(|| format!("未知应用: {app}"))?;
+    data.current = Some(official_id);
+
+    let plugin_on = root
+        .settings
+        .get("applyClaudePlugin")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let desktop_on = root
+        .settings
+        .get("applyClaudeDesktop")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    sync_claude_plugin_after_switch(plugin_on, &app, true);
+    sync_claude_desktop_after_switch(desktop_on, &app, true, None, Some(handle.inner()));
+    persist(&root)?;
+    let out = root.clone();
+    drop(root);
+    tray::refresh(&app_handle);
+    Ok(out)
+}
+
 /// 切换当前激活供应商。直连模式写 live；代理模式仅热切换内存 target。
 #[tauri::command]
 fn switch_provider(
@@ -456,8 +514,28 @@ fn proxy_port(root: &Root) -> u16 {
         .unwrap_or(proxy::DEFAULT_PORT)
 }
 
-/// 设 settings.reliability.proxyEnabled。
-fn set_proxy_enabled_flag(root: &mut Root, enabled: bool) {
+/// 读取某客户端是否开启本地路由（兼容旧的全局 proxyEnabled）。
+fn app_routing_enabled(root: &Root, app: &str) -> bool {
+    let rel = root.settings.get("reliability");
+    if let Some(apps) = rel
+        .and_then(|r| r.get("proxyApps"))
+        .and_then(|v| v.as_object())
+    {
+        return apps.get(app).and_then(|v| v.as_bool()).unwrap_or(false);
+    }
+    // 迁移：旧全局开关 true → 每个客户端都视为开
+    rel.and_then(|r| r.get("proxyEnabled"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// 写某客户端路由开关；同时同步旧 proxyEnabled = 任一客户端开，保持兼容。
+fn set_app_routing_flag(root: &mut Root, app: &str, enabled: bool) {
+    // 迁移安全：先按旧值算出各客户端当前有效路由，避免首次分客户端写入时丢掉另一个客户端。
+    let seed: Vec<(String, bool)> = proxy::PROXY_APPS
+        .iter()
+        .map(|a| ((*a).to_string(), app_routing_enabled(root, a)))
+        .collect();
     if !root.settings.is_object() {
         root.settings = serde_json::json!({});
     }
@@ -465,65 +543,98 @@ fn set_proxy_enabled_flag(root: &mut Root, enabled: bool) {
     let rel = obj
         .entry("reliability")
         .or_insert_with(|| serde_json::json!({}));
-    if let Some(r) = rel.as_object_mut() {
-        r.insert("proxyEnabled".into(), serde_json::Value::Bool(enabled));
+    let Some(r) = rel.as_object_mut() else {
+        return;
+    };
+    {
+        let apps = r.entry("proxyApps").or_insert_with(|| serde_json::json!({}));
+        if let Some(a) = apps.as_object_mut() {
+            for (name, value) in &seed {
+                a.entry(name.clone())
+                    .or_insert(serde_json::Value::Bool(*value));
+            }
+            a.insert(app.to_string(), serde_json::Value::Bool(enabled));
+        }
     }
+    let any = proxy::PROXY_APPS.iter().any(|x| {
+        r.get("proxyApps")
+            .and_then(|v| v.get(*x))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    });
+    r.insert("proxyEnabled".into(), serde_json::Value::Bool(any));
 }
 
-/// 代理状态（前端查询用）。in_flight/total/last_activity_ms 为本地活跃度计数，
-/// 仅事件次数、不碰请求内容、不出本机。
+/// 单个客户端的路由状态 + 本地活跃度计数（仅事件次数，不碰请求内容、不出本机）。
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ProxyStatus {
-    enabled: bool,
-    port: u16,
+struct AppRouteStatus {
+    routed: bool,
     in_flight: u32,
     total: u64,
     last_activity_ms: u64,
 }
 
-/// 查询代理是否在跑 + 端口 + 本地活跃度计数。
+/// 代理状态（前端查询用）：服务是否运行 + 端口 + 每客户端路由/计数。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProxyStatus {
+    running: bool,
+    port: u16,
+    claude: AppRouteStatus,
+    codex: AppRouteStatus,
+}
+
+fn app_route_status(handle: &proxy::ProxyHandle, app: &str) -> AppRouteStatus {
+    let counters = handle.counters(app);
+    AppRouteStatus {
+        routed: handle.is_routed(app),
+        in_flight: counters.map(|c| c.in_flight()).unwrap_or(0),
+        total: counters.map(|c| c.total()).unwrap_or(0),
+        last_activity_ms: counters.map(|c| c.last_activity_ms()).unwrap_or(0),
+    }
+}
+
+/// 查询代理是否在跑 + 端口 + 每客户端路由与本地活跃度计数。
 #[tauri::command]
 fn proxy_status(app_handle: AppHandle) -> ProxyStatus {
     let handle = app_handle.state::<proxy::ProxyHandle>();
     ProxyStatus {
-        enabled: handle.is_running(),
+        running: handle.is_running(),
         port: handle.current_port(),
-        in_flight: handle.in_flight(),
-        total: handle.total(),
-        last_activity_ms: handle.last_activity_ms(),
+        claude: app_route_status(&handle, "claude"),
+        codex: app_route_status(&handle, "codex"),
     }
 }
 
-/// 开启/关闭本地热切换代理。
-/// 开：起服务 + 两个 app 的当前 provider → 设内存 target + 把 live 的 base_url 改写为 localhost。
-/// 关：停服务 + 把两个 app 的当前 provider 真实配置写回 live（恢复直连）。
+/// 开启/关闭某个客户端的本地热切换路由（分客户端，不再整体一刀切）。
+/// 开：服务未跑则拉起 + 该客户端当前 provider 设 target + live→localhost（官方保持直连）。
+/// 关：该客户端写回真实 live + 清 target；若已无任何客户端在路由则停服务。
 #[tauri::command]
-async fn set_proxy_enabled(
+async fn set_app_routing(
     app_handle: AppHandle,
     state: State<'_, AppState>,
     proxy_state: State<'_, ProxyState>,
+    app: String,
     enabled: bool,
 ) -> Result<Root, String> {
+    if !proxy::PROXY_APPS.contains(&app.as_str()) {
+        return Err(format!("未知应用: {app}"));
+    }
     let handle = app_handle.state::<proxy::ProxyHandle>();
-    // 先取出需要的数据，避免把 std MutexGuard 跨 await 持有。
-    let (backup, port, runtime_config, currents, desktop_on) = {
+    // 取数据（不跨 await 持锁）。
+    let (backup, port, runtime_config, current, desktop_on) = {
         let root = state.0.lock().unwrap();
-        let mut cur: Vec<(String, Provider)> = Vec::new();
-        for app in ["claude", "codex"] {
-            if let Some(data) = root.apps.get(app) {
-                if let Some(id) = &data.current {
-                    if let Some(p) = data.providers.get(id) {
-                        cur.push((app.to_string(), p.clone()));
-                    }
-                }
-            }
-        }
+        let current = root
+            .apps
+            .get(&app)
+            .and_then(|data| data.current.as_ref().and_then(|id| data.providers.get(id)))
+            .cloned();
         (
             backup_flag(&root),
             proxy_port(&root),
             proxy::ProxyRuntimeConfig::from_settings(&root.settings),
-            cur,
+            current,
             root.settings
                 .get("applyClaudeDesktop")
                 .and_then(|v| v.as_bool())
@@ -532,44 +643,44 @@ async fn set_proxy_enabled(
     };
 
     if enabled {
-        {
+        // 首个开启路由的客户端负责拉起服务。
+        if !handle.is_running() {
             let mut ctl = proxy_state.0.lock().await;
             ctl.start(port, runtime_config).await?;
         }
-        // 设 target + 改写 live 为 localhost
-        for (app, provider) in &currents {
+        handle.set_routed(&app, true);
+        if let Some(provider) = &current {
             if store::is_official_provider(provider) {
-                proxy::clear_target(&handle.targets, app);
-                continue;
+                proxy::clear_target(&handle.targets, &app);
+                live::write_live(&app, provider, backup)?;
+            } else if let Some(target) = proxy::target_from_provider(&app, provider) {
+                proxy::set_target(&handle.targets, &app, target);
+                let proxied = proxy::proxied_provider(&app, provider, port);
+                live::write_live(&app, &proxied, backup)?;
             }
-            if let Some(t) = proxy::target_from_provider(app, provider) {
-                proxy::set_target(&handle.targets, app, t);
-            }
-            let proxied = proxy::proxied_provider(app, provider, port);
-            live::write_live(app, &proxied, backup)?;
         }
     } else {
-        {
+        handle.set_routed(&app, false);
+        if let Some(provider) = &current {
+            if !store::is_official_provider(provider) {
+                live::write_live(&app, provider, backup)?;
+            }
+        }
+        proxy::clear_target(&handle.targets, &app);
+        // 已无任何客户端在路由 → 停服务。
+        if handle.routed_count() == 0 {
             let mut ctl = proxy_state.0.lock().await;
             ctl.stop();
         }
-        // 恢复真实配置写回 live
-        for (app, provider) in &currents {
-            if store::is_official_provider(provider) {
-                proxy::clear_target(&handle.targets, app);
-                continue;
-            }
-            live::write_live(app, provider, backup)?;
-        }
     }
 
-    // 代理起停翻转了桌面版有效端点（localhost ↔ 直连），按新状态重写桌面版 profile。
-    if desktop_on {
-        if let Some((app, provider)) = currents.iter().find(|(app, _)| app == "claude") {
+    // 桌面版随切换：仅 claude，按新的 claude-routed 状态重写 profile。
+    if desktop_on && app == "claude" {
+        if let Some(provider) = &current {
             let is_official = store::is_official_provider(provider);
             sync_claude_desktop_after_switch(
                 true,
-                app,
+                &app,
                 is_official,
                 Some(provider),
                 Some(handle.inner()),
@@ -578,7 +689,7 @@ async fn set_proxy_enabled(
     }
 
     let mut root = state.0.lock().unwrap();
-    set_proxy_enabled_flag(&mut root, enabled);
+    set_app_routing_flag(&mut root, &app, enabled);
     persist(&root)?;
     let out = root.clone();
     drop(root);
@@ -776,7 +887,7 @@ fn set_auto_launch(
 fn import_live(app_handle: AppHandle, state: State<AppState>) -> Result<Root, String> {
     let mut root = state.0.lock().unwrap();
     if !import_live_in_place(&mut root) {
-        return Err("未在 ~/.claude 或 ~/.codex 找到可导入的现有配置".into());
+        return Err("未在 ~/.claude、~/.codex 或 ~/.grok 找到可导入的现有配置".into());
     }
     persist(&root)?;
     let out = root.clone();
@@ -811,6 +922,18 @@ fn import_live_in_place(root: &mut Root) -> bool {
         data.current = Some(id);
         touched = true;
     }
+    // grok（纯第三方，无官方卡兜底：导入即设为当前项）
+    if let Some(mut p) = live::import_grok() {
+        let data = root.apps.entry("grok".into()).or_default();
+        let id = unique_id(&data.providers, "imported-current");
+        p.id = id.clone();
+        if !data.order.contains(&id) {
+            data.order.push(id.clone());
+        }
+        data.providers.insert(id.clone(), p);
+        data.current = Some(id);
+        touched = true;
+    }
     touched
 }
 
@@ -827,6 +950,197 @@ fn unique_id(providers: &std::collections::HashMap<String, Provider>, base: &str
         }
         n += 1;
     }
+}
+
+/// 从名称生成 ascii id 基底（中文名等无 ascii 字符时回退 "imported"）。
+fn slug_ascii(s: &str) -> String {
+    let mut out = String::new();
+    let mut prev_dash = false;
+    for ch in s.trim().to_lowercase().chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+            prev_dash = false;
+        } else if !out.is_empty() && !prev_dash {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    let trimmed = out.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        "imported".to_string()
+    } else {
+        trimmed
+    }
+}
+
+/// 扫描 cc-switch 配置（SQLite 优先、config.json 回退），返回可导入候选，不落盘。
+#[tauri::command]
+fn scan_ccswitch() -> Result<ccswitch::CcswitchScan, String> {
+    ccswitch::scan()
+}
+
+/// 导入用户勾选的 cc-switch 供应商：分配唯一 id、追加到列表，不改变当前激活项。
+#[tauri::command]
+fn import_ccswitch(
+    app_handle: AppHandle,
+    state: State<AppState>,
+    selected: Vec<ccswitch::CcswitchProvider>,
+) -> Result<Root, String> {
+    let mut root = state.0.lock().unwrap();
+    let mut imported = 0usize;
+    for cand in selected {
+        if !proxy::PROXY_APPS.contains(&cand.app.as_str()) {
+            continue;
+        }
+        let data = root.apps.entry(cand.app.clone()).or_default();
+        let id = unique_id(&data.providers, &slug_ascii(&cand.name));
+        let provider = Provider {
+            id: id.clone(),
+            name: cand.name,
+            category: Some("imported".into()),
+            settings_config: cand.settings_config,
+            meta: cand.meta,
+            failover: serde_json::json!({ "enabled": false }),
+        };
+        data.providers.insert(id.clone(), provider);
+        if !data.order.contains(&id) {
+            data.order.push(id);
+        }
+        imported += 1;
+    }
+    if imported == 0 {
+        return Err("没有可导入的供应商".into());
+    }
+    root.ensure_official_providers();
+    persist(&root)?;
+    let out = root.clone();
+    drop(root);
+    tray::refresh(&app_handle);
+    Ok(out)
+}
+
+/// 单个客户端的环境体检结果。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppDiagnosis {
+    app: String,
+    routed: bool,
+    live_base_url: Option<String>,
+    localhost_residue: bool,
+    placeholder_key: bool,
+    current_name: Option<String>,
+    healthy: bool,
+    issue: Option<String>,
+    fixable: bool,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EnvDiagnosis {
+    proxy_running: bool,
+    apps: Vec<AppDiagnosis>,
+}
+
+fn diagnose_app(app: &str, routed: bool, running: bool, root: &Root) -> AppDiagnosis {
+    let snap = if app == "claude" {
+        repair::read_claude()
+    } else {
+        repair::read_codex()
+    };
+    let localhost_residue = snap
+        .base_url
+        .as_deref()
+        .map(repair::is_localhost)
+        .unwrap_or(false);
+    let placeholder_key = snap.key_is_placeholder;
+    let current_name = root
+        .apps
+        .get(app)
+        .and_then(|d| d.current.as_ref().and_then(|id| d.providers.get(id)))
+        .map(|p| p.name.clone());
+    // 代理在跑且该客户端确在路由：localhost 属正常状态。
+    let routing_ok = routed && running;
+    let (healthy, issue, fixable) = if routing_ok {
+        (true, None, false)
+    } else if localhost_residue || placeholder_key {
+        (
+            false,
+            Some(
+                "检测到本地代理占位残留（base_url 指向 127.0.0.1 或密钥为占位符）。\
+                 可能是代理异常退出所致，此时客户端无法直连供应商。"
+                    .to_string(),
+            ),
+            true,
+        )
+    } else {
+        (true, None, false)
+    };
+    AppDiagnosis {
+        app: app.to_string(),
+        routed,
+        live_base_url: snap.base_url,
+        localhost_residue,
+        placeholder_key,
+        current_name,
+        healthy,
+        issue,
+        fixable,
+    }
+}
+
+/// 环境体检：逐客户端检查 live 是否残留本地代理占位。
+#[tauri::command]
+fn environment_diagnose(app_handle: AppHandle, state: State<AppState>) -> EnvDiagnosis {
+    let handle = app_handle.state::<proxy::ProxyHandle>();
+    let running = handle.is_running();
+    let root = state.0.lock().unwrap();
+    let apps = proxy::PROXY_APPS
+        .iter()
+        .map(|app| diagnose_app(app, handle.is_routed(app), running, &root))
+        .collect();
+    EnvDiagnosis {
+        proxy_running: running,
+        apps,
+    }
+}
+
+/// 一键修复某客户端：备份后把 live 重写为「直连当前供应商」（无当前项则恢复原始快照），
+/// 清除代理目标并关闭该客户端路由标记，使修复持久生效。
+#[tauri::command]
+fn environment_repair(
+    app_handle: AppHandle,
+    state: State<AppState>,
+    app: String,
+) -> Result<Root, String> {
+    if !proxy::PROXY_APPS.contains(&app.as_str()) {
+        return Err(format!("未知应用: {app}"));
+    }
+    let handle = app_handle.state::<proxy::ProxyHandle>();
+    if handle.is_routed(&app) && handle.is_running() {
+        return Err(format!(
+            "{app} 正在本地路由（属正常状态）。如需直连，请先关闭该客户端的本地路由。"
+        ));
+    }
+    let mut root = state.0.lock().unwrap();
+    let backup = backup_flag(&root);
+    // 关闭该客户端路由标记，避免下次启动又自动把 live 指回 localhost。
+    set_app_routing_flag(&mut root, &app, false);
+    let current = root
+        .apps
+        .get(&app)
+        .and_then(|d| d.current.as_ref().and_then(|id| d.providers.get(id)).cloned());
+    match current {
+        Some(provider) => live::write_live(&app, &provider, backup)?,
+        None => original::restore_app(&app)?,
+    }
+    // 同时清掉运行期路由标记，避免修复后自检面板仍显示「本地路由中」。
+    handle.set_routed(&app, false);
+    proxy::clear_target(&handle.targets, &app);
+    persist(&root)?;
+    let out = root.clone();
+    drop(root);
+    tray::refresh(&app_handle);
+    Ok(out)
 }
 
 /// Windows 11 起，为无边框窗口（`decorations: false`）显式声明圆角。
@@ -868,23 +1182,18 @@ pub fn run() {
     // 新版本首次建立原始快照时，如果上次保持代理开启，先把 provider 的真实配置
     // 写回 live，避免把 localhost 占位配置保存成恢复基线。
     if !original::status().captured {
-        let proxy_was_enabled = root
-            .settings
-            .get("reliability")
-            .and_then(|r| r.get("proxyEnabled"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        if proxy_was_enabled {
-            for app in ["claude", "codex"] {
-                let provider = root
-                    .apps
-                    .get(app)
-                    .and_then(|data| data.current.as_ref().and_then(|id| data.providers.get(id)))
-                    .cloned();
-                if let Some(provider) = provider {
-                    if let Err(error) = live::write_live(app, &provider, false) {
-                        eprintln!("[z-switch] 建立原始快照前恢复 {app} 真实配置失败：{error}");
-                    }
+        for app in proxy::PROXY_APPS.iter().copied() {
+            if !app_routing_enabled(&root, app) {
+                continue;
+            }
+            let provider = root
+                .apps
+                .get(app)
+                .and_then(|data| data.current.as_ref().and_then(|id| data.providers.get(id)))
+                .cloned();
+            if let Some(provider) = provider {
+                if let Err(error) = live::write_live(app, &provider, false) {
+                    eprintln!("[z-switch] 建立原始快照前恢复 {app} 真实配置失败：{error}");
                 }
             }
         }
@@ -898,6 +1207,12 @@ pub fn run() {
         }
     };
 
+    // 升级补采：grok 是后加的客户端，老装机的原始快照里没有它。
+    // 在 grok 首次被覆盖前，把现有 ~/.grok/config.toml 收进快照作为恢复基线。
+    if let Err(error) = original::capture_grok_if_missing() {
+        eprintln!("[z-switch] 补采 grok 原始配置失败：{error}");
+    }
+
     let initial_import_done = root
         .settings
         .get("initialImportDone")
@@ -909,6 +1224,40 @@ pub fn run() {
         }
         if let Some(settings) = root.settings.as_object_mut() {
             settings.insert("initialImportDone".into(), serde_json::Value::Bool(true));
+        }
+        root_changed = true;
+    }
+
+    // Grok 首次采纳（独立于全局 initialImportDone）：grok 是后加的客户端，老装机
+    // 的 initialImportDone 早已为 true，全局首启导入不会覆盖到它。用独立标志做一次性
+    // 收编：若从未采纳过、且 grok 分区为空、且现有 ~/.grok/config.toml 可导入，就把它
+    // 整份收编成一张卡并设为当前项（不重写 live，保留用户原文件），避免升级用户首次
+    // 切换 Grok 卡时现有配置被“凭空覆盖”。
+    let grok_import_done = root
+        .settings
+        .get("grokImportDone")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    if snapshot_ready && !grok_import_done {
+        let grok_empty = root
+            .apps
+            .get("grok")
+            .map(|data| data.providers.is_empty())
+            .unwrap_or(true);
+        if grok_empty {
+            if let Some(mut provider) = live::import_grok() {
+                let data = root.apps.entry("grok".into()).or_default();
+                let id = unique_id(&data.providers, "imported-current");
+                provider.id = id.clone();
+                if !data.order.contains(&id) {
+                    data.order.push(id.clone());
+                }
+                data.providers.insert(id.clone(), provider);
+                data.current = Some(id);
+            }
+        }
+        if let Some(settings) = root.settings.as_object_mut() {
+            settings.insert("grokImportDone".into(), serde_json::Value::Bool(true));
         }
         root_changed = true;
     }
@@ -983,6 +1332,10 @@ pub fn run() {
             speedtest,
             fetch_models,
             import_live,
+            scan_ccswitch,
+            import_ccswitch,
+            environment_diagnose,
+            environment_repair,
             original_config_status,
             open_backups_folder,
             open_config_dir,
@@ -990,11 +1343,12 @@ pub fn run() {
             open_proxy_log_folder,
             clear_proxy_error_log,
             restore_original,
+            restore_official_baseline,
             test_connectivity,
             test_stream,
             set_auto_launch,
             proxy_status,
-            set_proxy_enabled,
+            set_app_routing,
             set_claude_plugin_enabled,
             set_claude_onboarding_skip,
             set_claude_desktop_enabled
@@ -1021,21 +1375,20 @@ pub fn run() {
                 .on_menu_event(|app, event| tray::handle_menu_event(app, event.id.as_ref()))
                 .build(app)?;
 
-            // 上次退出时代理是开的 → live 文件仍指向 localhost，必须自动拉起代理，
-            // 否则 CLI 请求会打到死端口。读 flag + 当前 providers，起服务并设 target
-            // （live 已是 localhost，无需重写）。
+            // 上次退出时某些客户端开着路由 → 那些 live 文件仍指向 localhost，必须自动
+            // 拉起服务并按客户端恢复 routed/target，否则 CLI 请求会打到死端口。
             let handle = app.handle().clone();
-            let (enabled, port, runtime_config, currents) = {
+            let (routed_apps, port, runtime_config, currents) = {
                 let st = handle.state::<AppState>();
                 let root = st.0.lock().unwrap();
-                let on = root
-                    .settings
-                    .get("reliability")
-                    .and_then(|r| r.get("proxyEnabled"))
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
+                let routed: Vec<String> = proxy::PROXY_APPS
+                    .iter()
+                    .copied()
+                    .filter(|a| app_routing_enabled(&root, a))
+                    .map(|a| a.to_string())
+                    .collect();
                 let mut cur: Vec<(String, Provider)> = Vec::new();
-                for a in ["claude", "codex"] {
+                for a in proxy::PROXY_APPS.iter().copied() {
                     if let Some(d) = root.apps.get(a) {
                         if let Some(id) = &d.current {
                             if let Some(p) = d.providers.get(id) {
@@ -1045,13 +1398,13 @@ pub fn run() {
                     }
                 }
                 (
-                    on,
+                    routed,
                     proxy_port(&root),
                     proxy::ProxyRuntimeConfig::from_settings(&root.settings),
                     cur,
                 )
             };
-            if enabled {
+            if !routed_apps.is_empty() {
                 let ph = handle.state::<proxy::ProxyHandle>().inner().clone();
                 let ps = handle.state::<ProxyState>();
                 let ctl_mutex = &ps.0;
@@ -1061,7 +1414,13 @@ pub fn run() {
                         eprintln!("[z-switch] 自动拉起代理失败：{e}");
                         return;
                     }
+                    for app in &routed_apps {
+                        ph.set_routed(app, true);
+                    }
                     for (app, provider) in &currents {
+                        if !routed_apps.contains(app) {
+                            continue;
+                        }
                         if store::is_official_provider(provider) {
                             proxy::clear_target(&ph.targets, app);
                             continue;

@@ -12,7 +12,7 @@ pub fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let root = state.0.lock().unwrap();
     let mut mb = MenuBuilder::new(app);
 
-    for (key, title) in [("claude", "Claude Code"), ("codex", "Codex")] {
+    for (key, title) in [("claude", "Claude Code"), ("codex", "Codex"), ("grok", "Grok")] {
         let hdr = MenuItemBuilder::with_id(format!("hdr:{key}"), title)
             .enabled(false)
             .build(app)?;

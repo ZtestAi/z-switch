@@ -12,8 +12,9 @@ import {
   originalConfigStatus,
   openHelpDocument,
   restoreOriginal,
+  restoreOfficialBaseline,
   proxyStatus,
-  setProxyEnabled,
+  setAppRouting,
   type ActiveDeleteMode,
   type OriginalConfigStatus,
   type ProxyStatus,
@@ -21,8 +22,9 @@ import {
 import ProviderModal from "./ProviderModal";
 import SettingsModal from "./SettingsModal";
 import ImportExportModal from "./ImportExportModal";
+import CcswitchImportModal from "./CcswitchImportModal";
 import StreamTestModal, { type StreamTestSummary } from "./StreamTestModal";
-import Titlebar from "./Titlebar";
+import WindowControls from "./Titlebar";
 import ConfirmDialog from "./ConfirmDialog";
 import DeepLinkImportDialog, { type PendingImport } from "./DeepLinkImportDialog";
 import Toasts, { type Toast, type ToastKind } from "./Toasts";
@@ -30,7 +32,9 @@ import { buildClaudeProvider, buildCodexProvider, DEFAULT_CODEX_WIRE_API, isHttp
 import { checkForUpdate, installAndRelaunch, type Update } from "./updater";
 import { onOpenUrl, getCurrent } from "@tauri-apps/plugin-deep-link";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { applyTheme, type Theme } from "./theme";
+import brandLogo from "./assets/zsw.png";
 import {
   AlertIcon,
   BookOpenIcon,
@@ -42,14 +46,48 @@ import {
   InboxIcon,
   MessageIcon,
   PlusIcon,
+  RefreshIcon,
   SettingsIcon,
   TrashIcon,
-  UploadIcon,
 } from "./Icons";
 
-const TABS: { key: AppType; label: string }[] = [
-  { key: "claude", label: "Claude Code" },
-  { key: "codex", label: "Codex" },
+// 客户端图标（内联，贴合 Claude / Codex 品牌感）
+const ClaudeMark = (
+  <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+    <path d="M12 2 3 7v10l9 5 9-5V7z" opacity=".16" />
+    <path d="M12 6.5 8 16h1.9l.8-2h2.6l.8 2H16L12 6.5zm-.9 6 .9-2.4.9 2.4z" />
+  </svg>
+);
+const CodexMark = (
+  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="m8 8-4 4 4 4M16 8l4 4-4 4M14 5l-4 14" />
+  </svg>
+);
+const GrokMark = (
+  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M5 19 19 5M9 19l10-10M15 5 5 15" opacity=".55" />
+    <path d="M5 5l14 14" />
+  </svg>
+);
+function MoonIcon() {
+  return (
+    <svg className="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" />
+    </svg>
+  );
+}
+function DotsIcon() {
+  return (
+    <svg className="ui-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <circle cx="5" cy="12" r="1.5" /><circle cx="12" cy="12" r="1.5" /><circle cx="19" cy="12" r="1.5" />
+    </svg>
+  );
+}
+
+const CLIENTS: { key: AppType; label: string; icon: React.ReactNode }[] = [
+  { key: "claude", label: "Claude Code", icon: ClaudeMark },
+  { key: "codex", label: "Codex", icon: CodexMark },
+  { key: "grok", label: "Grok", icon: GrokMark },
 ];
 
 function initials(name: string): string {
@@ -61,18 +99,39 @@ function isOfficialProvider(provider: Provider): boolean {
   return provider.category === "official" || (provider.meta as any)?.kind === "officialLocal";
 }
 
-function summarize(p: Provider): { url: string; model: string } {
+function summarizeUrl(p: Provider): string {
   const env = (p.settingsConfig as any)?.env ?? {};
   const cfg = (p.settingsConfig as any) ?? {};
-  const url =
+  return (
     env.ANTHROPIC_BASE_URL ??
     (cfg.config ? String(cfg.config).match(/base_url\s*=\s*"([^"]+)"/)?.[1] : "") ??
-    "";
-  const model =
-    env.ANTHROPIC_MODEL ??
-    (cfg.config ? String(cfg.config).match(/^model\s*=\s*"([^"]+)"/m)?.[1] : "") ??
-    "";
-  return { url: url || "", model: model || "" };
+    ""
+  ) || "";
+}
+
+function stripOneM(m: string): string {
+  return m.replace(/\s*\[1M\]\s*$/i, "").trim();
+}
+
+// 取供应商展示用模型列表（Claude：主+各档去重；Codex：单模型）+ 是否含 1M + wire_api
+function providerModels(app: AppType, p: Provider): { models: string[]; has1M: boolean; wireApi?: string } {
+  if (app === "claude") {
+    const env = (p.settingsConfig as any)?.env ?? {};
+    const raw = [
+      env.ANTHROPIC_MODEL,
+      env.ANTHROPIC_DEFAULT_HAIKU_MODEL,
+      env.ANTHROPIC_DEFAULT_SONNET_MODEL,
+      env.ANTHROPIC_DEFAULT_OPUS_MODEL,
+      env.ANTHROPIC_DEFAULT_FABLE_MODEL,
+    ].filter(Boolean).map(String);
+    const has1M = raw.some((m) => /\[1M\]/i.test(m));
+    const models = [...new Set(raw.map(stripOneM).filter(Boolean))];
+    return { models, has1M };
+  }
+  const cfg = String((p.settingsConfig as any)?.config ?? "");
+  const model = cfg.match(/^model\s*=\s*"([^"]+)"/m)?.[1];
+  const wireApi = ((p.meta as any)?.wireApi ?? cfg.match(/wire_api\s*=\s*"([^"]+)"/)?.[1]) as string | undefined;
+  return { models: model ? [model] : [], has1M: false, wireApi };
 }
 
 function slug(s: string): string {
@@ -80,8 +139,6 @@ function slug(s: string): string {
   return t || `imported-${Math.floor(Math.random() * 1e6).toString(36)}`;
 }
 
-// 深链导入的身份判定：直接比对现有「名称」（slug 对中文会返回随机值，不能用来判同名）。
-// 同名则给显示名加数字后缀（满血 → 满血 2），并保证 id 也唯一，绝不覆盖已有供应商。
 function uniqueImportIdentity(
   requested: string,
   providers: Record<string, Provider>,
@@ -127,39 +184,34 @@ function cloneJson<T>(value: T): T {
 
 type Lat = { ms?: number; err?: boolean; loading?: boolean };
 type DropTarget = { id: string; after: boolean };
+type HealthKind = "full" | "ok" | "bad" | "none";
 
-function latClass(l?: Lat): string {
-  if (!l || (l.ms == null && !l.err && !l.loading)) return "none";
-  if (l.loading) return "none";
-  if (l.err) return "slow";
+function latClass(l?: Lat): HealthKind {
+  if (!l || (l.ms == null && !l.err)) return "none";
+  if (l.err) return "bad";
   const ms = l.ms!;
-  return ms <= 1000 ? "good" : ms <= 3000 ? "mid" : "slow";
+  return ms <= 1000 ? "full" : ms <= 3000 ? "ok" : "bad";
 }
 function latText(l?: Lat): string {
-  if (!l) return "未测";
-  if (l.loading) return "…";
+  if (!l) return "未测速";
+  if (l.loading) return "测速中";
   if (l.err) return "超时";
   if (l.ms != null) return l.ms < 1 ? "<1ms" : `${Math.round(l.ms)}ms`;
-  return "未测";
+  return "未测速";
 }
-// 信号条点亮数：good=3 / mid=2 / slow=1 / 其它=0
-function latBars(l?: Lat): number {
-  switch (latClass(l)) {
-    case "good":
-      return 3;
-    case "mid":
-      return 2;
-    case "slow":
-      return 1;
-    default:
-      return 0;
-  }
+
+const HRANK: Record<HealthKind, number> = { full: 3, ok: 2, bad: 1, none: 0 };
+function healthText(kind: HealthKind): string {
+  return kind === "full" ? "正常" : kind === "ok" ? "偏慢" : kind === "bad" ? "异常" : "未测";
 }
-const BAR_HEIGHTS = [5, 8, 12];
+
+// 侧栏可拖拽宽度（本地持久化）
+const SIDEBAR_MIN = 220;
+const SIDEBAR_MAX = 460;
+const SIDEBAR_DEFAULT = 264;
 
 export default function App() {
   const [root, setRoot] = useState<Root | null>(null);
-  // 深链在 []-effect 里运行，闭包里的 root 会是挂载时的旧值；用 ref 取最新配置算唯一 id。
   const rootRef = useRef<Root | null>(null);
   rootRef.current = root;
   const [tab, setTab] = useState<AppType>("claude");
@@ -167,8 +219,9 @@ export default function App() {
   const [modal, setModal] = useState<null | { edit?: Provider }>(null);
   const [streamModal, setStreamModal] = useState<null | { app: AppType; provider: Provider }>(null);
   const [streamResults, setStreamResults] = useState<Record<string, StreamTestSummary>>({});
-  const [showSettings, setShowSettings] = useState(false);
+  const [page, setPage] = useState<"providers" | "settings">("providers");
   const [io, setIo] = useState<null | "import" | "export">(null);
+  const [ccOpen, setCcOpen] = useState(false);
   const [dragId, setDragId] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
   const [originalStatus, setOriginalStatus] = useState<OriginalConfigStatus | null>(null);
@@ -177,9 +230,9 @@ export default function App() {
   const [updateProgress, setUpdateProgress] = useState<number | null>(null);
   const [proxy, setProxy] = useState<ProxyStatus | null>(null);
   const [proxyBusy, setProxyBusy] = useState(false);
-  const [proxyRate, setProxyRate] = useState(0); // 估算「次/分」，仅体感提示
+  const [proxyRate, setProxyRate] = useState<Record<AppType, number>>({ claude: 0, codex: 0, grok: 0 });
   const [nowTs, setNowTs] = useState(0);
-  const rateSampleRef = useRef<{ total: number; ts: number } | null>(null);
+  const rateSampleRef = useRef<Record<AppType, { total: number; ts: number } | null>>({ claude: null, codex: null, grok: null });
   const [confirm, setConfirm] = useState<null | {
     title?: string;
     message: string;
@@ -194,6 +247,13 @@ export default function App() {
   const toastId = useRef(0);
   const dragSourceRef = useRef<string | null>(null);
   const dropTargetRef = useRef<DropTarget | null>(null);
+  const [sidebarW, setSidebarW] = useState<number>(() => {
+    const v = Number(localStorage.getItem("zsw.sidebarW"));
+    return Number.isFinite(v) && v >= SIDEBAR_MIN && v <= SIDEBAR_MAX ? v : SIDEBAR_DEFAULT;
+  });
+  const lastWRef = useRef(sidebarW);
+  const resizingRef = useRef(false);
+  const [maximized, setMaximized] = useState(false);
 
   function pushToast(kind: ToastKind, msg: string) {
     const id = ++toastId.current;
@@ -204,13 +264,12 @@ export default function App() {
   useEffect(() => {
     getConfig().then(setRoot).catch((e) => pushToast("error", String(e)));
     originalConfigStatus().then(setOriginalStatus).catch(() => {});
-    // 启动静默检查更新：有新版只置标识，绝不弹窗/toast 打扰用户。
     checkForUpdate()
       .then((update) => setUpdateInfo(update))
       .catch(() => {});
   }, []);
 
-  // 轮询代理状态 + 本地活跃度（2s）：驱动底部状态栏，与设置页共用同一后端句柄。
+  // 轮询代理状态 + 本地活跃度（2s）
   useEffect(() => {
     let alive = true;
     async function poll() {
@@ -218,19 +277,21 @@ export default function App() {
         const st = await proxyStatus();
         if (!alive) return;
         const now = Date.now();
-        const prev = rateSampleRef.current;
-        if (prev && st.total >= prev.total && now > prev.ts) {
-          const rpm = ((st.total - prev.total) / ((now - prev.ts) / 1000)) * 60;
-          // 指数平滑，避免单请求造成的尖峰抖动
-          setProxyRate((r) => Math.round(r * 0.5 + rpm * 0.5));
-        } else if (prev && st.total < prev.total) {
-          setProxyRate(0); // 代理重启，频率基线重置
+        for (const app of ["claude", "codex"] as ("claude" | "codex")[]) {
+          const total = st[app].total;
+          const prev = rateSampleRef.current[app];
+          if (prev && total >= prev.total && now > prev.ts) {
+            const rpm = ((total - prev.total) / ((now - prev.ts) / 1000)) * 60;
+            setProxyRate((r) => ({ ...r, [app]: Math.round((r[app] ?? 0) * 0.5 + rpm * 0.5) }));
+          } else if (prev && total < prev.total) {
+            setProxyRate((r) => ({ ...r, [app]: 0 }));
+          }
+          rateSampleRef.current[app] = { total, ts: now };
         }
-        rateSampleRef.current = { total: st.total, ts: now };
         setProxy(st);
         setNowTs(now);
       } catch {
-        /* 忽略：代理未起或命令暂不可用 */
+        /* 忽略 */
       }
     }
     poll();
@@ -241,38 +302,38 @@ export default function App() {
     };
   }, []);
 
-  // 底部「一键路由」：复用设置页 toggleProxy 逻辑（开=起服务指向 localhost；关=恢复直连）。
-  function toggleRouting() {
-    if (proxyBusy || !proxy) return;
-    const next = !proxy.enabled;
+  // 底部「一键路由」：只对指定客户端生效（分客户端路由）。Grok 不支持路由。
+  function toggleRouting(app: AppType) {
+    if (app === "grok" || proxyBusy || !proxy) return;
+    const next = !proxy[app].routed;
     const port = proxy.port;
+    const label = app === "claude" ? "Claude Code" : "Codex";
     setProxyBusy(true);
-    setProxy((p) => (p ? { ...p, enabled: next } : p)); // 乐观更新
-    setProxyEnabled(next)
+    setProxy((p) => (p ? { ...p, [app]: { ...p[app], routed: next } } : p));
+    setAppRouting(app, next)
       .then((r) => {
         setRoot(r);
+        proxyStatus().then(setProxy).catch(() => {});
         pushToast(
           "success",
           next
-            ? `本地路由已开启（127.0.0.1:${port}）· 切换供应商无需重启客户端`
-            : "本地路由已关闭，已恢复直连",
+            ? `${label} 已开启本地路由（127.0.0.1:${port}/${app}）· 切换供应商无需重启`
+            : `${label} 已关闭本地路由，已恢复直连`,
         );
       })
       .catch((e) => {
-        setProxy((p) => (p ? { ...p, enabled: !next } : p)); // 失败回滚
+        setProxy((p) => (p ? { ...p, [app]: { ...p[app], routed: !next } } : p));
         pushToast("error", "切换本地路由失败：" + String(e));
       })
       .finally(() => setProxyBusy(false));
   }
 
-  // 设置页「检查更新」手动触发：无更新时给一次成功提示。
   async function handleCheckUpdate() {
     const update = await checkForUpdate();
     setUpdateInfo(update);
     if (!update) pushToast("success", "已是最新版本");
   }
 
-  // 下载并安装更新，完成后自动重启。
   async function handleInstallUpdate() {
     if (!updateInfo || updateBusy) return;
     setUpdateBusy(true);
@@ -289,11 +350,25 @@ export default function App() {
     }
   }
 
-  // 应用主题（settings.theme 变化时）
   const theme = (root?.settings as any)?.theme as Theme | undefined;
   useEffect(() => {
     applyTheme(theme);
   }, [theme]);
+
+  // 侧栏快捷主题切换（在 light/dark 间切并持久化，system 仍可在设置里选）
+  function toggleTheme() {
+    const resolved =
+      theme === "dark"
+        ? "dark"
+        : theme === "light"
+          ? "light"
+          : window.matchMedia?.("(prefers-color-scheme: dark)").matches
+            ? "dark"
+            : "light";
+    const next: Theme = resolved === "dark" ? "light" : "dark";
+    onSaveSettings({ ...((root?.settings as Record<string, unknown>) ?? {}), theme: next });
+    pushToast("success", next === "dark" ? "已切换到深色主题" : "已切换到浅色主题");
+  }
 
   // 托盘切换后后端广播 → 重载配置
   useEffect(() => {
@@ -306,35 +381,69 @@ export default function App() {
     return () => un?.();
   }, []);
 
+  // 窗口最大化状态：最大化时取消窗口圆角，贴屏更规整
+  useEffect(() => {
+    const w = getCurrentWindow();
+    w.isMaximized().then(setMaximized).catch(() => {});
+    let un: (() => void) | undefined;
+    w.onResized(() => w.isMaximized().then(setMaximized).catch(() => {}))
+      .then((f) => (un = f))
+      .catch(() => {});
+    return () => un?.();
+  }, []);
+
   // 深链 zswitch://import?... 一键导入
   useEffect(() => {
     function parseAndImport(url: string) {
       try {
         const u = new URL(url);
+        // 兼容两种协议：zswitch://（本软件）与 ccswitch://（cc-switch，中转站一键导入按钮常用）
+        const isCcswitch = u.protocol === "ccswitch:";
         const q = u.searchParams;
-        const appk = (q.get("app") === "codex" ? "codex" : "claude") as AppType;
+
+        // cc-switch 深链支持 provider/mcp/prompt/skill，这里只接受 provider
+        if (isCcswitch) {
+          const resource = (q.get("resource") || "provider").toLowerCase();
+          if (resource !== "provider") {
+            pushToast("error", "该链接不是供应商导入（暂不支持 MCP / Prompt / Skill）");
+            return;
+          }
+        }
+
+        const appRaw = q.get("app");
+        // cc-switch 还支持 gemini/opencode 等，本软件仅 claude/codex
+        if (isCcswitch && appRaw && appRaw !== "claude" && appRaw !== "codex") {
+          pushToast("error", `暂不支持导入 ${appRaw} 供应商（仅 Claude Code / Codex）`);
+          return;
+        }
+        const appk = (appRaw === "codex" ? "codex" : "claude") as AppType;
         const nm = q.get("name") || "导入的供应商";
-        const baseUrl = (q.get("baseUrl") || "").trim();
-        // 密钥：支持明文 key，或 base64 的 keyB64（减少原文出现在 URL 里）。
-        let key = q.get("key") || "";
+
+        // 地址：zswitch 用 baseUrl；ccswitch 用 endpoint（可逗号分隔多个，取第一个）
+        const baseUrl = ((isCcswitch ? q.get("endpoint") : q.get("baseUrl")) || "").split(",")[0].trim();
+
+        // 密钥：zswitch 用 key/keyB64；ccswitch 用 apiKey
+        let key = (isCcswitch ? q.get("apiKey") : q.get("key")) || "";
         const kb64 = q.get("keyB64");
         if (!key && kb64) {
           try {
             key = atob(kb64);
           } catch {
-            /* 非法 base64，忽略，按未提供处理 */
+            /* 非法 base64，忽略 */
           }
         }
         const model = q.get("model") || "";
-        // 校验：接入点必须是 http(s)，否则拒绝（不弹框、不落盘）。
         if (!isHttpUrl(baseUrl)) {
           pushToast("error", "链接被拒绝：接入点必须是 http(s) 地址");
           return;
         }
-        // 绝不覆盖已有供应商：同名则加数字后缀新增一张（保证 name 与 id 都唯一），
-        // 让不同分组（满血 / 其他渠道 …）能并存，也让重复导入可区分而非静默盖掉。
         const providers = rootRef.current?.apps[appk]?.providers ?? {};
         const { name: finalName, id, collision } = uniqueImportIdentity(nm, providers);
+        // 分档模型：zswitch=haiku/sonnet/opus/fable；ccswitch=haikuModel/sonnetModel/opusModel
+        const haiku = (isCcswitch ? q.get("haikuModel") : q.get("haiku")) || undefined;
+        const sonnet = (isCcswitch ? q.get("sonnetModel") : q.get("sonnet")) || undefined;
+        const opus = (isCcswitch ? q.get("opusModel") : q.get("opus")) || undefined;
+        const fable = (isCcswitch ? q.get("fableModel") : q.get("fable")) || undefined;
         const provider =
           appk === "codex"
             ? buildCodexProvider(
@@ -349,14 +458,13 @@ export default function App() {
                   baseUrl,
                   apiKeyField: (q.get("apiKeyField") as any) || "ANTHROPIC_AUTH_TOKEN",
                   model,
-                  haiku: q.get("haiku") || undefined,
-                  sonnet: q.get("sonnet") || undefined,
-                  opus: q.get("opus") || undefined,
-                  fable: q.get("fable") || undefined,
+                  haiku,
+                  sonnet,
+                  opus,
+                  fable,
                 },
                 key,
               );
-        // 不直接落盘：暂存并弹确认框，让用户看清再导入（安全底线）。
         setPendingImport({
           app: appk,
           name: finalName,
@@ -389,6 +497,7 @@ export default function App() {
     () => (data ? data.order.map((id) => data.providers[id]).filter(Boolean) : []),
     [data],
   );
+
   async function run(p: Promise<Root>, okMsg?: string) {
     try {
       setRoot(await p);
@@ -396,6 +505,34 @@ export default function App() {
     } catch (e) {
       pushToast("error", String(e));
     }
+  }
+
+  // 由真实信号（延迟 + 上次流式测试）派生健康结论；不伪造评分
+  function healthKind(clientKey: AppType, p: Provider): HealthKind {
+    if (isOfficialProvider(p)) return "full";
+    const l = lat[`${clientKey}:${p.id}`];
+    const sr = streamResults[`${clientKey}:${p.id}`];
+    if (l?.err) return "bad";
+    if (sr?.status === "error") return "bad";
+    if (sr?.status === "warning") return "ok";
+    if (sr?.status === "success") {
+      if (l?.ms != null) return l.ms <= 1000 ? "full" : l.ms <= 3000 ? "ok" : "bad";
+      return "full";
+    }
+    return latClass(l);
+  }
+
+  function clientBestHealth(clientKey: AppType): HealthKind {
+    const d = root?.apps[clientKey];
+    if (!d) return "none";
+    let best: HealthKind = "none";
+    for (const id of d.order) {
+      const p = d.providers[id];
+      if (!p || isOfficialProvider(p)) continue;
+      const k = healthKind(clientKey, p);
+      if (HRANK[k] > HRANK[best]) best = k;
+    }
+    return best;
   }
 
   function onDelete(p: Provider) {
@@ -434,8 +571,7 @@ export default function App() {
   }
 
   function onRestoreOriginal(app: AppType) {
-    const label = app === "claude" ? "Claude Code" : "Codex";
-    setShowSettings(false);
+    const label = app === "claude" ? "Claude Code" : app === "grok" ? "Grok" : "Codex";
     setConfirm({
       title: `恢复 ${label} 原始配置`,
       message: `将恢复首次运行 z-switch 时保存的 ${label} 配置，并取消当前供应商关联。恢复前会自动备份电脑上的现有配置。`,
@@ -444,6 +580,33 @@ export default function App() {
       onConfirm: () => {
         setConfirm(null);
         run(restoreOriginal(app), `已恢复 ${label} 原始配置`);
+      },
+    });
+  }
+
+  function onRestoreOfficialBaseline(app: AppType) {
+    const label = app === "claude" ? "Claude Code" : "Codex";
+    const loginHint =
+      app === "claude"
+        ? "重置后请用 Claude Code 自行登录官方账号（如需）。"
+        : "若本机曾保存过 Codex 官方登录态会一并恢复；否则请在 Codex 里重新登录。";
+    setConfirm({
+      title: `重置 ${label} 为官方账号配置`,
+      message:
+        `将把 ${label} 的配置文件重置为干净的官方账号基线（清除中转地址与密钥）。` +
+        `现有文件会先备份到 ~/.z-switch/backups/；即使文件已损坏也会强制重写。` +
+        loginHint +
+        `本地路由会关闭，当前生效项切换为官方账号。此操作不会恢复你之前的第三方供应商配置。`,
+      confirmText: "确认重置",
+      danger: true,
+      onConfirm: () => {
+        setConfirm(null);
+        restoreOfficialBaseline(app)
+          .then((r) => {
+            setRoot(r);
+            pushToast("success", `已将 ${label} 重置为官方账号配置`);
+          })
+          .catch((e) => pushToast("error", String(e)));
       },
     });
   }
@@ -512,7 +675,7 @@ export default function App() {
   async function speedtestAll() {
     for (const p of ordered) {
       if (isOfficialProvider(p)) continue;
-      const { url } = summarize(p);
+      const url = summarizeUrl(p);
       const key = `${tab}:${p.id}`;
       if (!url) {
         setLat((m) => ({ ...m, [key]: { err: true } }));
@@ -525,6 +688,22 @@ export default function App() {
       } catch {
         setLat((m) => ({ ...m, [key]: { err: true } }));
       }
+    }
+  }
+
+  async function speedtestOne(p: Provider) {
+    const url = summarizeUrl(p);
+    const key = `${tab}:${p.id}`;
+    if (!url) {
+      setLat((m) => ({ ...m, [key]: { err: true } }));
+      return;
+    }
+    setLat((m) => ({ ...m, [key]: { loading: true } }));
+    try {
+      const ms = await speedtest(url);
+      setLat((m) => ({ ...m, [key]: { ms } }));
+    } catch {
+      setLat((m) => ({ ...m, [key]: { err: true } }));
     }
   }
 
@@ -595,202 +774,350 @@ export default function App() {
     clearSortState();
   }
 
+  // 侧栏 / 主区分隔线：拖动调宽，双击复位，本地持久化
+  function onResizeDown(e: React.PointerEvent<HTMLDivElement>) {
+    e.preventDefault();
+    resizingRef.current = true;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  }
+  function onResizeMove(e: React.PointerEvent<HTMLDivElement>) {
+    if (!resizingRef.current) return;
+    const w = Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, Math.round(e.clientX)));
+    lastWRef.current = w;
+    setSidebarW(w);
+  }
+  function onResizeUp(e: React.PointerEvent<HTMLDivElement>) {
+    if (!resizingRef.current) return;
+    resizingRef.current = false;
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+    localStorage.setItem("zsw.sidebarW", String(lastWRef.current));
+  }
+  function onResizeReset() {
+    lastWRef.current = SIDEBAR_DEFAULT;
+    setSidebarW(SIDEBAR_DEFAULT);
+    localStorage.setItem("zsw.sidebarW", String(SIDEBAR_DEFAULT));
+  }
+
   const existingIds = data ? Object.keys(data.providers) : [];
 
-  // 底部状态栏派生值
-  const proxyOn = proxy?.enabled ?? false;
+  // 底部状态栏派生值（跟随当前选中客户端）。Grok 不支持本地路由，恒直连。
+  const appStatus = proxy && tab !== "grok" ? proxy[tab] : null;
+  const routedForTab = appStatus?.routed ?? false;
   const proxyPort = proxy?.port ?? 8899;
-  const idleSec =
-    proxy && proxy.lastActivityMs > 0
-      ? Math.max(0, Math.floor((nowTs - proxy.lastActivityMs) / 1000))
-      : null;
-  const proxyActive = proxyOn && ((proxy?.inFlight ?? 0) > 0 || (idleSec != null && idleSec < 10));
+  const appInFlight = appStatus?.inFlight ?? 0;
+  const appLastActivity = appStatus?.lastActivityMs ?? 0;
+  const appRate = proxyRate[tab] ?? 0;
+  const idleSec = appLastActivity > 0 ? Math.max(0, Math.floor((nowTs - appLastActivity) / 1000)) : null;
+  const proxyActive = routedForTab && (appInFlight > 0 || (idleSec != null && idleSec < 10));
   const currentName = data?.current ? data.providers[data.current]?.name ?? null : null;
   const activeSegments: string[] = [];
-  if ((proxy?.inFlight ?? 0) > 0) activeSegments.push(`${proxy!.inFlight} 进行中`);
-  if (proxyRate >= 1) activeSegments.push(`~${proxyRate} 次/分`);
+  if (appInFlight > 0) activeSegments.push(`${appInFlight} 进行中`);
+  if (appRate >= 1) activeSegments.push(`~${appRate} 次/分`);
   activeSegments.push("活跃");
 
+  const clientLabel = CLIENTS.find((c) => c.key === tab)?.label ?? "";
+
   return (
-    <div className="app">
-      <Titlebar />
-
-      <div className="toolbar">
-        <div className="segmented">
-          {TABS.map((t) => (
-            <button key={t.key} className={"seg" + (tab === t.key ? " active" : "")} onClick={() => setTab(t.key)}>
-              <span className="dot" />
-              {t.label}
-            </button>
-          ))}
+    <div className={"app" + (maximized ? " maximized" : "")} style={{ "--sidebar-w": `${sidebarW}px` } as React.CSSProperties}>
+      {/* ============ 侧栏：客户端 ============ */}
+      <aside className="sidebar">
+        <div className="sb-top" data-tauri-drag-region>
+          <img className="brand-logo" src={brandLogo} alt="" />
+          <span className="brand">z-switch</span>
         </div>
-        <div className="tools">
-          <button
-            className="icon-btn"
-            onClick={() => openHelpDocument().catch((error) => pushToast("error", String(error)))}
-            title="打开使用帮助文档"
-          >
-            <BookOpenIcon />文档
-          </button>
-          <button className="icon-btn" onClick={speedtestAll} title="测速全部端点"><BoltIcon />测速</button>
-          <button className="icon-btn icon-only" onClick={() => setIo("import")} title="导入 JSON" aria-label="导入 JSON"><DownloadIcon /></button>
-          <button className="icon-btn icon-only" onClick={() => setIo("export")} title="导出 JSON" aria-label="导出 JSON"><UploadIcon /></button>
-          <button className={"icon-btn icon-only" + (updateInfo ? " has-badge" : "")} onClick={() => setShowSettings(true)} title={updateInfo ? "设置 · 有新版本可用" : "设置"} aria-label="设置"><SettingsIcon />{updateInfo && <span className="update-dot" />}</button>
-          <button className="btn accent" onClick={() => setModal({})}><PlusIcon />添加</button>
-        </div>
-      </div>
 
-      <div className={"list" + (dragId ? " sorting" : "")}>
-        {ordered.length === 0 && (
-          <div className="empty">
-            <div className="empty-ico"><InboxIcon /></div>
-            <h3>还没有供应商</h3>
-            <p>从现有配置导入，或点右上角「添加」快速开始。</p>
-            <div className="empty-row">
-              <button className="btn" onClick={onImportLive}><DownloadIcon />导入现有配置</button>
-              <button className="btn accent" onClick={() => setModal({})}><PlusIcon />添加供应商</button>
-            </div>
-          </div>
-        )}
-        {ordered.map((p) => {
-          const active = data?.current === p.id;
-          const official = isOfficialProvider(p);
-          const { url, model } = summarize(p);
-          const l = lat[`${tab}:${p.id}`];
-          const streamResult = streamResults[`${tab}:${p.id}`];
-          return (
-            <div
-              key={p.id}
-              data-provider-id={p.id}
-              className={
-                "card" +
-                (active ? " active" : "") +
-                (dragId === p.id ? " dragging" : "") +
-                (dropTarget?.id === p.id && dragId !== p.id
-                  ? dropTarget.after
-                    ? " drop-after"
-                    : " drop-before"
-                  : "")
-              }
-            >
-              <span
-                className="avatar drag-handle"
-                style={{ background: (p.meta as any)?.iconColor ?? "#4a5bd4" }}
-                title="按住头像拖拽排序"
-                onPointerDown={(e) => onSortPointerDown(e, p.id)}
-                onPointerMove={onSortPointerMove}
-                onPointerUp={onSortPointerUp}
-                onPointerCancel={onSortPointerCancel}
-              >
-                {initials(p.name)}
-              </span>
-              <div className="meta">
-                <div className="row1">
-                  <span className="name">{p.name}</span>
-                  {official && <span className="official-badge">官方账号</span>}
-                  {!official && tab === "codex" && (p.meta as any)?.wireApi && (
-                    <span className="model">wire_api·{(p.meta as any).wireApi}</span>
-                  )}
-                </div>
-                <div className="row2">
-                  {official ? (
-                    <span className="url">使用本机 {tab === "claude" ? "Claude Code" : "Codex"} 登录状态</span>
-                  ) : (
-                    <>
-                      <span className="url">{url || "—"}</span>
-                      {model && <span className="model">{model}</span>}
-                    </>
-                  )}
-                </div>
-              </div>
-              <div className="cluster">
-                {official ? (
-                  <span className="local-account-state"><span className="pulse" />本机登录</span>
-                ) : (
-                  <span className={"lat " + latClass(l)}>
-                    <span className="bar">
-                      {BAR_HEIGHTS.map((h, i) => (
-                        <i key={i} className={i < latBars(l) ? "on" : ""} style={{ height: h }} />
-                      ))}
+        <div className="sb-scroll">
+          <div className="sb-label">客户端</div>
+          <div className="clist">
+            {CLIENTS.map((c) => {
+              const d = root?.apps[c.key];
+              const count = d ? d.order.length : 0;
+              const curName = d?.current ? d.providers[d.current]?.name ?? null : null;
+              const hb = clientBestHealth(c.key);
+              return (
+                <button
+                  key={c.key}
+                  className={"citem" + (page === "providers" && tab === c.key ? " sel" : "")}
+                  onClick={() => { setTab(c.key); setPage("providers"); }}
+                >
+                  <span className="cico">{c.icon}</span>
+                  <span className="cbody">
+                    <span className="cname">{c.label}</span>
+                    <span className="csub">
+                      <span className={"hb " + hb} />
+                      {curName ? `当前 · ${curName}` : "未选择"}
                     </span>
-                    {latText(l)}
                   </span>
-                )}
-                {active ? (
-                  <span className="in-use"><CheckIcon />已生效</span>
-                ) : (
-                  <button className="use-btn" onClick={() => run(switchProvider(tab, p.id), `已切换到 ${p.name}`)}>切换</button>
-                )}
-                {!official && (
-                  <>
-                    <button
-                      className={"provider-test-btn provider-test-icon" + (streamResult ? ` ${streamResult.status}` : "")}
-                      onClick={() => setStreamModal({ app: tab, provider: p })}
-                      title={streamResult?.status === "success"
-                        ? `真实流式测试：上次成功，首字 ${streamResult.firstTokenMs}ms`
-                        : streamResult?.status === "warning"
-                          ? "真实流式测试：上次可用，但未检测到流式响应"
-                          : streamResult?.status === "error"
-                            ? "真实流式测试：上次调用失败"
-                            : "真实流式测试"}
-                      aria-label={`真实流式测试 ${p.name}`}
-                    >
-                      {streamResult?.status === "success" ? <CheckIcon />
-                        : streamResult?.status === "warning" || streamResult?.status === "error" ? <AlertIcon />
-                          : <MessageIcon />}
-                    </button>
-                    <button
-                      className="card-icon-btn copy-btn"
-                      onClick={() => onCopyProvider(p)}
-                      title="复制供应商"
-                      aria-label={`复制供应商 ${p.name}`}
-                    >
-                      <CopyIcon />
-                    </button>
-                    <button className="card-icon-btn" onClick={() => setModal({ edit: p })} title="编辑" aria-label={`编辑供应商 ${p.name}`}><EditIcon /></button>
-                    <button className="card-icon-btn danger-ghost" onClick={() => onDelete(p)} title="删除" aria-label={`删除供应商 ${p.name}`}><TrashIcon /></button>
-                  </>
-                )}
+                  {c.key !== "grok" && proxy?.[c.key]?.routed && <span className="route-tag">路由</span>}
+                  <span className="ccount">{count}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="sb-foot">
+          <button
+            className={"citem nav-item" + (page === "settings" ? " sel" : "")}
+            onClick={() => setPage("settings")}
+            title={updateInfo ? "设置 · 有新版本可用" : "设置"}
+          >
+            <span className="cico"><SettingsIcon /></span>
+            <span className="cbody"><span className="cname">设置</span></span>
+            {updateInfo && <span className="nav-dot" />}
+          </button>
+          <div className="foot-tools">
+            <button className="foot-btn" onClick={toggleTheme} title="切换深色 / 浅色主题">
+              <MoonIcon />主题
+            </button>
+            <button className="foot-btn" onClick={() => openHelpDocument().catch((e) => pushToast("error", String(e)))} title="使用帮助文档">
+              <BookOpenIcon />文档
+            </button>
+          </div>
+          <button
+            className="acct"
+            title="z-switch · 由真测 Ztest 出品"
+            onClick={() => pushToast("info", "z-switch · 开源 · 由真测 Ztest 出品 · ztest.ai")}
+          >
+            <img className="ava" src={brandLogo} alt="" />
+            <span className="who">
+              <b>真测 Ztest</b>
+              <span>ztest.ai · 本地保存</span>
+            </span>
+            <span className="acct-more"><DotsIcon /></span>
+          </button>
+        </div>
+      </aside>
+
+      {/* ============ 主区：供应商 ============ */}
+      <main className="main">
+        <div
+          className="resizer"
+          role="separator"
+          aria-orientation="vertical"
+          title="拖动调整侧栏宽度 · 双击复位"
+          onPointerDown={onResizeDown}
+          onPointerMove={onResizeMove}
+          onPointerUp={onResizeUp}
+          onPointerCancel={onResizeUp}
+          onDoubleClick={onResizeReset}
+        />
+        <div className="topbar">
+          <div className="tb-drag" data-tauri-drag-region>
+            <span className="crumb"><b>{page === "settings" ? "设置" : clientLabel}</b></span>
+          </div>
+          <div className="topbar-actions">
+            <WindowControls />
+          </div>
+        </div>
+
+        {page === "settings" ? (
+          <SettingsModal
+            asPage
+            settings={(root?.settings as Record<string, any>) ?? {}}
+            originalStatus={originalStatus}
+            onClose={() => setPage("providers")}
+            onSave={onSaveSettings}
+            onRestoreOriginal={onRestoreOriginal}
+            onRestoreOfficialBaseline={onRestoreOfficialBaseline}
+            onToast={pushToast}
+            updateInfo={updateInfo}
+            updateBusy={updateBusy}
+            updateProgress={updateProgress}
+            onCheckUpdate={handleCheckUpdate}
+            onInstallUpdate={handleInstallUpdate}
+            onOpenImport={() => setIo("import")}
+            onOpenExport={() => setIo("export")}
+            onOpenCcswitch={() => setCcOpen(true)}
+            onRepaired={(r) => setRoot(r)}
+          />
+        ) : (
+        <>
+        <div className="list-header">
+          <span className="lh-title">供应商 <b>{ordered.length}</b></span>
+          <div className="lh-actions">
+            <button className="btn" onClick={speedtestAll}><BoltIcon />全部测速</button>
+            <button className="btn primary" onClick={() => setModal({})}><PlusIcon />添加供应商</button>
+          </div>
+        </div>
+        <div className={"list" + (dragId ? " sorting" : "")}>
+          {ordered.length === 0 ? (
+            <div className="empty">
+              <div className="empty-ico"><InboxIcon /></div>
+              <h3>还没有供应商</h3>
+              <p>从现有配置导入，或点右上角「添加供应商」快速开始。</p>
+              <div className="empty-row">
+                <button className="btn" onClick={onImportLive}><DownloadIcon />导入现有配置</button>
+                <button className="btn accent" onClick={() => setModal({})}><PlusIcon />添加供应商</button>
               </div>
             </div>
-          );
-        })}
-      </div>
+          ) : (
+            <div className="plist-box">
+              {ordered.map((p) => {
+                const active = data?.current === p.id;
+                const official = isOfficialProvider(p);
+                const url = summarizeUrl(p);
+                const { models, has1M, wireApi } = providerModels(tab, p);
+                const l = lat[`${tab}:${p.id}`];
+                const kind = healthKind(tab, p);
+                const streamResult = streamResults[`${tab}:${p.id}`];
+                return (
+                  <div
+                    key={p.id}
+                    data-provider-id={p.id}
+                    className={
+                      "prow" +
+                      (active ? " active" : "") +
+                      (dragId === p.id ? " dragging" : "") +
+                      (dropTarget?.id === p.id && dragId !== p.id
+                        ? dropTarget.after
+                          ? " drop-after"
+                          : " drop-before"
+                        : "")
+                    }
+                  >
+                    <span
+                      className="p-ava"
+                      title="按住拖拽排序"
+                      onPointerDown={(e) => onSortPointerDown(e, p.id)}
+                      onPointerMove={onSortPointerMove}
+                      onPointerUp={onSortPointerUp}
+                      onPointerCancel={onSortPointerCancel}
+                    >
+                      {initials(p.name)}
+                    </span>
 
-      <div className="statusbar">
-        {proxyOn ? (
-          <>
-            <span className="si">
-              <span className={"sb-dot on" + (proxyActive ? " live" : "")} />
-              代理 <b>ON</b> · 127.0.0.1:{proxyPort}
-            </span>
-            <span className="si">
-              {proxyActive
-                ? activeSegments.join(" · ")
-                : `空闲${idleSec != null ? ` ${idleSec}s` : ""}`}
-            </span>
-          </>
-        ) : (
-          <span className="si">
-            <span className="sb-dot off" />
-            直连模式 · 切换供应商需重启客户端
-          </span>
-        )}
-        <div className="sb-right">
-          {currentName && <span className="si sb-current">生效 · {currentName}</span>}
-          <label className={"sb-route" + (proxyBusy ? " busy" : "")}>
-            一键路由
-            <button
-              type="button"
-              className={"switch" + (proxyOn ? " on" : "")}
-              role="switch"
-              aria-checked={proxyOn}
-              aria-label="一键开启本地路由"
-              onClick={toggleRouting}
-            />
-          </label>
+                    <div className="pinfo">
+                      <div className="prow1">
+                        <span className="pname">{p.name}</span>
+                        {official && <span className="badge">官方账号</span>}
+                        {active && <span className="badge green"><span className="d" />正在生效</span>}
+                      </div>
+                      <div className="prow2">
+                        {official ? (
+                          <span className="purl">使用本机 {clientLabel} 登录 · 提供全部模型</span>
+                        ) : (
+                          <>
+                            <span className="purl mono" title={url}>{url || "—"}</span>
+                            {(models.length > 0 || (tab === "codex" && wireApi) || has1M) && (
+                              <span className="prow2-models">
+                                <span className="sep" />
+                                {models.length > 0 && <span className="tierchip mono" title={models.join(" · ")}>{models[0]}</span>}
+                                {models.length > 1 && <span className="tierchip more" title={models.join(" · ")}>+{models.length - 1}</span>}
+                                {tab === "codex" && wireApi && <span className="tierchip">wire_api·{wireApi}</span>}
+                                {has1M && <span className="tierchip more">1M</span>}
+                              </span>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="phealth">
+                      {official ? (
+                        <span className="local-state"><span className="d" />本机登录</span>
+                      ) : (
+                        <>
+                          <span className={"verdict " + kind}><span className="d" />{healthText(kind)}</span>
+                          <span className={"chip-lat" + (l?.loading ? " loading" : "")}>{latText(l)}</span>
+                        </>
+                      )}
+                    </div>
+
+                    <div className="pactions">
+                      {active ? (
+                        <span className="inuse"><CheckIcon />已生效</span>
+                      ) : (
+                        <button className="row-btn" onClick={() => run(switchProvider(tab, p.id), `已切换到 ${p.name}`)}>切换</button>
+                      )}
+                      {!official && (
+                        <>
+                          <div className="row-tools">
+                            <button
+                              className={"mini-ic" + (streamResult ? ` test-${streamResult.status}` : "")}
+                              onClick={() => setStreamModal({ app: tab, provider: p })}
+                              title={streamResult?.status === "success"
+                                ? `真实流式测试：上次成功，首字 ${streamResult.firstTokenMs}ms`
+                                : streamResult?.status === "warning"
+                                  ? "真实流式测试：上次可用，但未检测到流式响应"
+                                  : streamResult?.status === "error"
+                                    ? "真实流式测试：上次调用失败"
+                                    : "真实流式测试"}
+                              aria-label={`真实流式测试 ${p.name}`}
+                            >
+                              {streamResult?.status === "success" ? <CheckIcon />
+                                : streamResult?.status === "warning" || streamResult?.status === "error" ? <AlertIcon />
+                                  : <MessageIcon />}
+                            </button>
+                            <button
+                              className={"mini-ic" + (l?.loading ? " spin" : "")}
+                              onClick={() => speedtestOne(p)}
+                              disabled={l?.loading}
+                              title="测速"
+                              aria-label={`测速 ${p.name}`}
+                            >
+                              {l?.loading ? <RefreshIcon /> : <BoltIcon />}
+                            </button>
+                          </div>
+                          <div className="row-tools">
+                            <button className="mini-ic" onClick={() => setModal({ edit: p })} title="编辑" aria-label={`编辑 ${p.name}`}><EditIcon /></button>
+                            <button className="mini-ic copy" onClick={() => onCopyProvider(p)} title="复制" aria-label={`复制 ${p.name}`}><CopyIcon /></button>
+                            <button className="mini-ic danger" onClick={() => onDelete(p)} title="删除" aria-label={`删除 ${p.name}`}><TrashIcon /></button>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
-      </div>
+        </>
+        )}
+
+        {/* 底部状态栏（跟随当前客户端） */}
+        <div className="statusbar">
+          {routedForTab ? (
+            <>
+              <span className="si">
+                <span className={"sb-dot on" + (proxyActive ? " live" : "")} />
+                本地路由 <b>ON</b> · 127.0.0.1:{proxyPort}/{tab}
+              </span>
+              <span className="si">
+                {proxyActive
+                  ? activeSegments.join(" · ")
+                  : `空闲${idleSec != null ? ` ${idleSec}s` : ""}`}
+              </span>
+            </>
+          ) : (
+            <span className="si">
+              <span className="sb-dot off" />
+              直连模式 · 切换供应商需重启客户端
+            </span>
+          )}
+          <div className="sb-right">
+            {currentName && <span className="si sb-current">生效 · {currentName}</span>}
+            {tab !== "grok" && (
+              <label className={"sb-route" + (proxyBusy ? " busy" : "")}>
+                {clientLabel} 路由
+                <button
+                  type="button"
+                  className={"switch" + (routedForTab ? " on" : "")}
+                  role="switch"
+                  aria-checked={routedForTab}
+                  aria-label={`${clientLabel} 本地路由`}
+                  onClick={() => toggleRouting(tab)}
+                />
+              </label>
+            )}
+          </div>
+        </div>
+      </main>
 
       {streamModal && (
         <StreamTestModal
@@ -812,21 +1139,6 @@ export default function App() {
           onSave={onSaveProvider}
         />
       )}
-      {showSettings && root && (
-        <SettingsModal
-          settings={(root.settings as Record<string, any>) ?? {}}
-          originalStatus={originalStatus}
-          onClose={() => setShowSettings(false)}
-          onSave={onSaveSettings}
-          onRestoreOriginal={onRestoreOriginal}
-          onToast={pushToast}
-          updateInfo={updateInfo}
-          updateBusy={updateBusy}
-          updateProgress={updateProgress}
-          onCheckUpdate={handleCheckUpdate}
-          onInstallUpdate={handleInstallUpdate}
-        />
-      )}
       {io && (
         <ImportExportModal
           mode={io}
@@ -834,6 +1146,16 @@ export default function App() {
           onImported={(r) => {
             setRoot(r);
             pushToast("success", "已导入配置");
+          }}
+        />
+      )}
+      {ccOpen && (
+        <CcswitchImportModal
+          onClose={() => setCcOpen(false)}
+          onImported={(r, count) => {
+            setRoot(r);
+            setCcOpen(false);
+            pushToast("success", `已从 cc-switch 导入 ${count} 个供应商`);
           }}
         />
       )}

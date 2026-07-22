@@ -116,6 +116,8 @@ impl Root {
                 },
             );
         }
+        // Grok 无本机官方登录态，纯第三方：初始为空列表，无当前项。
+        apps.insert("grok".into(), AppData::default());
         Root {
             version: 3,
             apps,
@@ -152,6 +154,12 @@ impl Root {
         let mut changed = false;
         if self.version < 3 {
             self.version = 3;
+            changed = true;
+        }
+
+        // 迁移：老装机没有 grok 分区，补一个空列表（无官方卡）。
+        if !self.apps.contains_key("grok") {
+            self.apps.insert("grok".into(), AppData::default());
             changed = true;
         }
 

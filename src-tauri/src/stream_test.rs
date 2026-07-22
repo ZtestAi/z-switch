@@ -87,9 +87,9 @@ fn endpoint(base_url: &str, app: &str, wire_api: &str) -> Result<String, String>
     }
     let path = match (app, wire_api) {
         ("claude", _) => "/messages",
-        ("codex", "chat") => "/chat/completions",
-        ("codex", "responses") => "/responses",
-        ("codex", _) => return Err("Codex wire_api 只能是 chat 或 responses".into()),
+        ("codex" | "grok", "chat") => "/chat/completions",
+        ("codex" | "grok", "responses") => "/responses",
+        ("codex" | "grok", _) => return Err("wire_api 只能是 chat 或 responses".into()),
         _ => return Err(format!("未知应用: {app}")),
     };
     if base.ends_with(path) {
@@ -110,7 +110,7 @@ fn request_body(app: &str, wire_api: &str, model: &str) -> Value {
             "stream": true,
             "messages": [{ "role": "user", "content": "Hi" }]
         }),
-        ("codex", "responses") => serde_json::json!({
+        ("codex" | "grok", "responses") => serde_json::json!({
             "model": model,
             "input": "Hi",
             "max_output_tokens": MAX_OUTPUT_TOKENS,
