@@ -58,6 +58,7 @@
 - [x] **Codex 适配 responses-only**：上游移除 `wire_api = "chat"`，供应商与 `~/.codex/config.toml` 启动时自动迁移（写前备份），表单移除协议选项；推理强度支持 low ~ ultra
 - [x] **Claude 5.x 模型**：默认模型与桌面版路由更新为 5.x（原生 1M），`[1M]` 标记仅旧模型需要
 - [x] **macOS ad-hoc 签名**，修复 Apple Silicon 提示「已损坏」（#1），Release 说明补充 macOS / Windows 安装指引
+- [x] **macOS 窗口圆角**：开启 `macOSPrivateApi`，修复透明窗口失效导致圆角外露出直角
 - [x] 真实测试新增「**模拟 CLI 请求**」（Claude Code / Codex），适配只放行官方客户端的中转站
 - [x] 关于页新增项目介绍、GitHub 仓库与 Releases 下载链接（打开 / 复制），自动更新失败时可手动下载
 - [x] 移除 ztest.ai 验真预留；`npm audit fix`；CI Node 升级到 22
