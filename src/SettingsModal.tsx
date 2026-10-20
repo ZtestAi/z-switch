@@ -4,6 +4,8 @@ import {
   openBackupsFolder,
   openProxyLogFolder,
   openConfigDir,
+  openProjectLink,
+  PROJECT_LINKS,
   proxyStatus,
   setAutoLaunch,
   setClaudeDesktopEnabled,
@@ -18,7 +20,7 @@ import {
 import type { AppType, Root } from "./types";
 import type { Update } from "./updater";
 import { getVersion } from "@tauri-apps/api/app";
-import { ChevronDownIcon, ChevronRightIcon, ClockIcon, CloseIcon, DownloadIcon, FolderIcon, TrashIcon, UploadIcon } from "./Icons";
+import { ChevronDownIcon, ChevronRightIcon, ClockIcon, CloseIcon, CopyIcon, DownloadIcon, FolderIcon, LinkIcon, TrashIcon, UploadIcon } from "./Icons";
 
 type SettingsTab = "general" | "integration" | "recover" | "about";
 
@@ -160,7 +162,7 @@ export default function SettingsModal({
       await onCheckUpdate();
     } catch (e) {
       console.error("[z-switch] 检查更新失败:", e);
-      onToast?.("error", "检查更新失败，请检查网络后重试");
+      onToast?.("error", "检查更新失败，可在下方「手动下载新版本」前往 Releases 页面下载");
     } finally {
       setCheckingUpdate(false);
     }
@@ -608,13 +610,26 @@ export default function SettingsModal({
     </>
   );
 
+  async function copyLink(url: string) {
+    try {
+      await navigator.clipboard.writeText(url);
+      onToast?.("success", "链接已复制");
+    } catch {
+      onToast?.("error", "复制失败，请手动复制：" + url);
+    }
+  }
+
+  function openLink(kind: keyof typeof PROJECT_LINKS) {
+    openProjectLink(kind).catch((e) => onToast?.("error", String(e)));
+  }
+
   const aboutPanel = (
     <div className="set-group">
       <h4>关于</h4>
       <div className="set-row">
         <div>
           <div className="l">z-switch{version ? ` v${version}` : ""}</div>
-          <div className="d">开源 · 无广告 · 由 真测 Ztest 出品</div>
+          <div className="d">面向 Claude Code、Codex 与 Grok 的供应商一键切换器 · 开源 · 无广告 · 由 真测 Ztest 出品</div>
         </div>
         <button
           type="button"
@@ -647,6 +662,26 @@ export default function SettingsModal({
           </button>
         </div>
       )}
+      <div className="set-row">
+        <div className="set-copy">
+          <div className="l">GitHub 仓库</div>
+          <div className="d">{PROJECT_LINKS.repo} · 源码、问题反馈，喜欢的话欢迎点个 Star</div>
+        </div>
+        <div className="about-actions">
+          <button type="button" className="btn" onClick={() => copyLink(PROJECT_LINKS.repo)}><CopyIcon />复制链接</button>
+          <button type="button" className="btn" onClick={() => openLink("repo")}><LinkIcon />打开</button>
+        </div>
+      </div>
+      <div className="set-row">
+        <div className="set-copy">
+          <div className="l">手动下载新版本</div>
+          <div className="d">自动更新检测失败（如无法访问 GitHub）时，可从 Releases 页面下载安装包覆盖安装，配置不会丢失</div>
+        </div>
+        <div className="about-actions">
+          <button type="button" className="btn" onClick={() => copyLink(PROJECT_LINKS.releases)}><CopyIcon />复制链接</button>
+          <button type="button" className="btn" onClick={() => openLink("releases")}><DownloadIcon />打开</button>
+        </div>
+      </div>
     </div>
   );
 

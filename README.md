@@ -43,6 +43,20 @@ One-click desktop provider switcher for Claude Code, Codex &amp; Grok — atomic
   <img src="docs/screenshots/ztest-1.png" alt="z-switch 主界面" width="760" />
 </div>
 
+### English
+
+**z-switch** is a free, open-source desktop app (Windows / macOS / Linux) for switching API providers in **Claude Code**, **OpenAI Codex CLI** and **Grok CLI** with one click — a lightweight [cc-switch](https://github.com/farion1231/cc-switch) alternative built with Tauri 2 + Rust.
+
+- Switch between official accounts and any third-party API relay / gateway without editing `settings.json`, `auth.json` or `config.toml` by hand.
+- Atomic writes, automatic backups and a one-click restore of your original config.
+- Provider health checks: connectivity test, model list fetch, HTTP latency test and a real streaming test (with optional Claude Code / Codex CLI request emulation for relays that only accept official clients).
+- Optional local proxy for hot-swapping providers while the CLI is running.
+- Syncs to Claude Desktop (3P gateway) and the Claude Code VS Code extension.
+- Supports Claude 5.x models (Fable 5.1 / Opus 5.5 / Sonnet 5.5 / Haiku 5.5) and Codex's Responses API.
+- No ads, no telemetry, no referral links. MIT licensed.
+
+[Download the latest release](https://github.com/ZtestAi/z-switch/releases) · [User guide (Chinese)](./docs/USAGE.md)
+
 ---
 
 ## 目录
@@ -67,12 +81,12 @@ One-click desktop provider switcher for Claude Code, Codex &amp; Grok — atomic
 | --- | --- |
 | **供应商管理** | Claude Code / Codex / Grok 分区管理、一键切换；自定义供应商的添加、复制、编辑、删除；表单与 JSON 两种编辑方式 |
 | **开箱即用** | 内置 Claude / OpenAI 官方账号卡片，可与任意 API 中转站来回切换；首次启动自动保留并导入已有的 `~/.claude` / `~/.codex` / `~/.grok` 配置 |
-| **多档模型** | Claude 支持主模型与 Haiku / Sonnet / Opus / Fable 四档独立配置，Sonnet / Opus / Fable 可勾选 **1M 长上下文**；Codex 可选 `responses` 或 `chat` 协议；Grok 单模型 + `context_window`（默认 500000） |
-| **供应商体检** | Base URL 智能推断、连通性测试、模型列表拉取、**HTTP 层测速**，以及发送最小流式 `Hi` 的**真实调用测试**（显示首字耗时与总耗时） |
+| **多档模型** | Claude 支持主模型与 Haiku / Sonnet / Opus / Fable 四档独立配置，已适配 Claude 5.x（原生 1M 上下文），旧模型可勾选 `[1M]` 标记；Codex 统一使用 `responses` 协议（旧 `chat` 配置自动迁移），支持 low ~ ultra 推理强度；Grok 单模型 + `context_window`（默认 500000） |
+| **供应商体检** | Base URL 智能推断、连通性测试、模型列表拉取、**HTTP 层测速**，以及发送最小流式 `Hi` 的**真实调用测试**（显示首字耗时与总耗时；可选**模拟 Claude Code / Codex CLI 请求**，适配只放行官方客户端的中转站） |
 | **迁移与自检** | 从 **cc-switch 一键导入**（SQLite 优先、config.json 回退）；**环境自检与修复**（清理 live 里残留的本地代理占位）；一键**重置为官方账号基线**（抗损坏，写前备份） |
 | **Claude 生态联动** | 切换可同步到 **Claude 桌面版**（独立聊天 App，写 3p 网关配置）与 **VS Code Claude Code 扩展**；可选跳过 Claude Code 初次安装确认；一键打开 Claude / Codex / Grok / z-switch 配置目录 |
 | **配置安全** | 独立原始快照、一键恢复、原子写入、写前备份、Codex 双文件回滚、切换前 backfill，避免手工改动丢失 |
-| **系统集成** | 系统托盘、单实例、窗口状态记忆、开机自启、深链 `zswitch://import` / `ccswitch://`（带确认弹窗、防覆盖）；关闭 / Alt+F4 最小化到托盘，托盘菜单「退出」才结束进程 |
+| **系统集成** | 系统托盘、单实例、窗口状态记忆、开机自启、应用内检查更新（网络受限时可从「关于」页直达 Releases 手动下载）、深链 `zswitch://import` / `ccswitch://`（带确认弹窗、防覆盖）；关闭 / Alt+F4 最小化到托盘，托盘菜单「退出」才结束进程 |
 | **界面** | 左侧栏桌面式布局、可拖拽调宽侧栏、应用内设置分区页；浅色 / 深色 / 跟随系统主题 |
 | **本地代理（实验）** | `localhost` 转发请求与流式响应，运行期间热切换目标，**Claude / Codex 分客户端独立开关** + 本地活跃度显示，附超时 / 连接池 / 请求体上限 / 脱敏错误日志 |
 
@@ -106,6 +120,8 @@ One-click desktop provider switcher for Claude Code, Codex &amp; Grok — atomic
 
 前往 [Releases](https://github.com/ZtestAi/z-switch/releases) 下载对应平台的安装包，或参考 [开发](#开发) 从源码自行构建。
 
+> **macOS 提示「已损坏，无法打开」？** 安装包未经 Apple 公证，把 z-switch 拖进「应用程序」后在终端执行 `xattr -dr com.apple.quarantine /Applications/z-switch.app` 即可，详见 [FAQ](./docs/USAGE.md#14-常见问题-faq)。
+
 ### 30 秒上手
 
 1. **首次启动** — z-switch 自动保存本机 Claude Code / Codex 原始配置，建立默认「官方账号」卡片；检测到已有中转配置会自动导入并设为当前项。
@@ -126,12 +142,12 @@ One-click desktop provider switcher for Claude Code, Codex &amp; Grok — atomic
 
 1. 首次启动时，z-switch 会先保存本机 Claude Code / Codex 原始配置，并为两个应用建立默认「官方账号」卡片；检测到现有中转配置时会自动导入并设为当前项。
 2. 点击右上角「添加」，填写供应商名称、Base URL 和 API Key；随后可测试连通性、拉取模型并测速。
-3. Claude 供应商可分别配置主模型以及 Haiku、Sonnet、Opus、Fable 四个模型档位；Codex 供应商可选择 `responses` 或 `chat` 协议。
+3. Claude 供应商可分别配置主模型以及 Haiku、Sonnet、Opus、Fable 四个模型档位；Codex 供应商固定使用 `responses` 协议（中转站需提供 `/v1/responses`）。
 4. 保存后点击供应商卡片上的「切换」，直连模式会写入客户端配置；真实测试图标可选择模型并发送一条最小流式 `Hi` 请求。
 5. 如需运行期间热切换，可在设置中开启「本地路由代理」；高级设置提供超时、连接复用、请求体限制和错误日志。
 6. 遇到问题时，可在设置中打开错误日志目录；需要退出 z-switch 管理时，可恢复首次保存的本机原始配置。
 
-**关于「真实测试」**：每个 API 中转站卡片都提供该入口，使用已保存的地址、密钥、模型和协议，向供应商发送一条 `Hi`（最多输出 32 tokens），在独立弹窗中实时显示回复、首字耗时与总耗时。测试结果仅在本次运行中回显到卡片；请求可能产生极少量模型调用费用，测试内容、回复与密钥均**不写入日志或持久化文件**。
+**关于「真实测试」**：每个 API 中转站卡片都提供该入口，使用已保存的地址、密钥、模型和协议，向供应商发送一条 `Hi`（最多输出 32 tokens），在独立弹窗中实时显示回复、首字耗时与总耗时。测试结果仅在本次运行中回显到卡片；请求可能产生极少量模型调用费用，测试内容、回复与密钥均**不写入日志或持久化文件**。若中转站只放行官方客户端（返回 403），可在弹窗左下角勾选「模拟 CLI 请求」后重试。
 
 </details>
 
@@ -165,7 +181,7 @@ One-click desktop provider switcher for Claude Code, Codex &amp; Grok — atomic
 
 失败请求会按设置写入 `~/.z-switch/logs/proxy-errors.jsonl`，仅记录上游状态、脱敏 URL、失败阶段和截断后的错误详情，**不记录请求正文**。日志自动脱敏当前供应商密钥并按文件大小轮转，可在设置页打开目录或清空。
 
-> **已知限制**：当前不会同步改写开启代理时已落入 live 配置的模型名和 Codex `wire_api`。因此热切换只适用于模型 / 协议兼容的供应商；跨模型或跨协议切换仍需关闭代理后直连切换。该模式仍需用真实供应商持续验证路径、鉴权头和流式响应兼容性。
+> **已知限制**：当前不会同步改写开启代理时已落入 live 配置的模型名。因此热切换只适用于模型兼容的供应商；跨模型切换仍需关闭代理后直连切换。该模式仍需用真实供应商持续验证路径、鉴权头和流式响应兼容性。
 
 ### Claude 生态联动（可选开关）
 
@@ -254,13 +270,17 @@ src-tauri/src/              后端（Rust + Tauri 2）
   config.rs                 路径与原子写入
   store.rs                  providers.json 数据模型
   live.rs                   Claude/Codex/Grok live 配置读写
+  original.rs               首次原始配置快照与恢复
+  official.rs               官方账号登录态保护（Codex auth.json 保存 / 恢复）
   proxy.rs                  本地代理和分客户端热切换目标
+  proxy_log.rs              本地代理脱敏错误日志
   ccswitch.rs               从 cc-switch 导入（SQLite 优先、config.json 回退）
   repair.rs                 环境自检：检测 live 里的本地代理占位残留
   claude_ext.rs             VS Code 扩展放行 + 跳过初次确认
   claude_desktop.rs         Claude 桌面版 3p 网关配置写盘
   connectivity.rs           HTTP 连通性检查与测速
   model_fetch.rs            模型列表拉取
+  stream_test.rs            真实流式调用测试（可模拟 Claude Code / Codex CLI 请求）
   tray.rs                   系统托盘
 ```
 
@@ -276,6 +296,12 @@ src-tauri/src/              后端（Rust + Tauri 2）
 本项目基于 [MIT License](./LICENSE) 开源，可自由用于个人与商业用途，只需保留版权与许可声明。
 
 项目参考了同为 MIT 许可的 cc-switch，其原始版权声明已一并保留在 [`LICENSE`](./LICENSE) 中。
+
+## Star History
+
+<a href="https://star-history.com/#ZtestAi/z-switch&Date">
+  <img src="https://api.star-history.com/svg?repos=ZtestAi/z-switch&type=Date" alt="Star History Chart" width="600" />
+</a>
 
 ---
 

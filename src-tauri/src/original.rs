@@ -174,6 +174,9 @@ pub fn restore_app(app: &str) -> Result<(), String> {
                 }
                 return Err(format!("恢复 config.toml 失败，auth.json 已回滚：{error}"));
             }
+            // 原始配置可能来自 Codex 移除 chat 协议之前，恢复后顺带修正，否则 Codex 无法启动。
+            // 恢复前已整体备份过，这里不再重复备份。
+            live::repair_codex_live_wire_api(false)?;
             Ok(())
         }
         "grok" => apply_file(

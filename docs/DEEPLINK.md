@@ -25,21 +25,21 @@ zswitch://import?app=<claude|codex>&name=<名称>&baseUrl=<http(s) 地址>&key=<
 | `baseUrl` | 通用 | **是** | 接入点，**必须是 http(s)**，否则链接被拒绝 |
 | `key` | 通用 | 否 | API Key（明文）。写入 Claude 的 `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY` 或 Codex 的 `OPENAI_API_KEY` |
 | `keyB64` | 通用 | 否 | base64 编码的 Key（与 `key` 二选一，`key` 优先）。仅编码非加密 |
-| `model` | 通用 | 否 | 主模型；Codex 缺省 `gpt-5.5` |
+| `model` | 通用 | 否 | 主模型；Codex 缺省 `gpt-6.1-sol` |
 | `apiKeyField` | claude | 否 | `ANTHROPIC_AUTH_TOKEN`（默认）或 `ANTHROPIC_API_KEY` |
-| `wireApi` | codex | 否 | `responses`（默认）或 `chat` |
+| `wireApi` | codex | 否 | **已废弃，传入会被忽略**。Codex 只支持 `responses` 协议 |
 | `haiku` / `sonnet` / `opus` / `fable` | claude | 否 | 各级别默认模型 |
 
 ## 示例
 
 Claude：
 ```
-zswitch://import?app=claude&name=%E6%88%91%E7%9A%84%E4%B8%AD%E8%BD%AC&baseUrl=https%3A%2F%2Fapi.example.com%2Fv1&key=sk-abcd1234&model=claude-sonnet-4-6
+zswitch://import?app=claude&name=%E6%88%91%E7%9A%84%E4%B8%AD%E8%BD%AC&baseUrl=https%3A%2F%2Fapi.example.com%2Fv1&key=sk-abcd1234&model=claude-sonnet-5-5
 ```
 
 Codex：
 ```
-zswitch://import?app=codex&name=MyCodex&baseUrl=https%3A%2F%2Fapi.example.com%2Fv1&keyB64=c2steHh4&wireApi=responses
+zswitch://import?app=codex&name=MyCodex&baseUrl=https%3A%2F%2Fapi.example.com%2Fv1&keyB64=c2steHh4&model=gpt-6.1-sol
 ```
 
 ## 安全须知

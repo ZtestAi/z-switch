@@ -5,8 +5,8 @@ import {
   buildClaudeProvider,
   buildCodexProvider,
   buildGrokProvider,
-  DEFAULT_CODEX_WIRE_API,
-  inferWireApi,
+  CODEX_REASONING_EFFORTS,
+  type CodexReasoningEffort,
   inferClaudeKeyField,
   needsV1Suffix,
   hasClaudeOneMMarker,
@@ -161,12 +161,7 @@ export default function ProviderModal({ app, initial, existingIds, onClose, onSa
   );
 
   // Codex
-  const [wireApi, setWireApi] = useState<"chat" | "responses">(
-    (initial?.meta as any)?.wireApi ??
-      (initConfigText.match(/wire_api\s*=\s*"([^"]+)"/)?.[1] as any) ??
-      DEFAULT_CODEX_WIRE_API,
-  );
-  const [effort, setEffort] = useState<"low" | "medium" | "high">(
+  const [effort, setEffort] = useState<CodexReasoningEffort>(
     (initConfigText.match(/model_reasoning_effort\s*=\s*"([^"]+)"/)?.[1] as any) ?? "high",
   );
   const [disableRespStore, setDisableRespStore] = useState(
@@ -205,19 +200,8 @@ export default function ProviderModal({ app, initial, existingIds, onClose, onSa
     setFetchedModels([]);
     setFetchMsg(null);
     setFetchState("idle");
-    if (app === "codex") {
-      const w = inferWireApi(v);
-      if (w && w !== wireApi) {
-        setWireApi(w);
-        setInferHint(`已按厂商自动选择 wire_api=${w}`);
-      } else {
-        setInferHint(null);
-      }
-      setV1Hint(needsV1Suffix(v)); // Codex 疑似缺 /v1 → 非阻断提醒
-      return;
-    }
-    if (app === "grok") {
-      // Grok 无 wire_api / key 字段推断，但地址同样需以 /v1 结尾 → 复用缺 /v1 提醒。
+    if (app === "codex" || app === "grok") {
+      // Codex / Grok 无 key 字段推断，但地址通常需以 /v1 结尾 → 非阻断提醒。
       setInferHint(null);
       setV1Hint(needsV1Suffix(v));
       return;
@@ -257,7 +241,7 @@ export default function ProviderModal({ app, initial, existingIds, onClose, onSa
           placeholder={placeholder}
           onChange={(v) => setValue(oneM ? setClaudeOneMMarker(v, true) : stripClaudeOneMMarker(v))}
         />
-        <label className="onem-toggle" title="启用 1M 长上下文（给模型名追加 [1M]）">
+        <label className="onem-toggle" title="给模型名追加 [1M]，仅 4.6 等旧模型需要；Claude 5.x 原生 1M，无需勾选">
           <input
             type="checkbox"
             checked={oneM}
@@ -430,7 +414,6 @@ export default function ProviderModal({ app, initial, existingIds, onClose, onSa
           category: initial?.category ?? "custom",
           baseUrl,
           model,
-          wireApi,
           reasoningEffort: effort,
           disableResponseStorage: disableRespStore,
           requiresOpenaiAuth: requiresAuth,
@@ -521,6 +504,7 @@ export default function ProviderModal({ app, initial, existingIds, onClose, onSa
                     {renderOneMRow("Sonnet", "默认主力模型", sonnet, setSonnet)}
                     {renderOneMRow("Opus", "最强 / 复杂任务模型", opus, setOpus)}
                     {renderOneMRow("Fable", "前沿 / 自主任务模型", fable, setFable)}
+                    <div className="hint">Claude 5.x 系列原生支持 1M 上下文，无需勾选 1M；该选项仅用于 4.6 等需要 [1M] 后缀才启用长上下文的模型。</div>
                   </div>
                 </>
               ) : app === "grok" ? (
@@ -559,14 +543,7 @@ export default function ProviderModal({ app, initial, existingIds, onClose, onSa
                       ariaLabel="Codex 模型"
                       onChange={setModel}
                     />
-                  </div>
-                  <div className="field">
-                    <label>wire_api</label>
-                    <div className="seg-mini">
-                      <button className={wireApi === "chat" ? "on" : ""} onClick={() => setWireApi("chat")}>chat</button>
-                      <button className={wireApi === "responses" ? "on" : ""} onClick={() => setWireApi("responses")}>responses</button>
-                    </div>
-                    <div className="hint">原生支持 Responses 的用 responses，OpenAI-chat 兼容的用 chat。</div>
+                    <div className="hint">Codex 仅支持 Responses 协议（wire_api = "responses"），中转站需提供 /v1/responses 接口。</div>
                   </div>
                 </>
               )}
@@ -615,10 +592,11 @@ export default function ProviderModal({ app, initial, existingIds, onClose, onSa
                   <div className="field">
                     <label>model_reasoning_effort</label>
                     <div className="seg-mini">
-                      {(["low", "medium", "high"] as const).map((v) => (
+                      {CODEX_REASONING_EFFORTS.map((v) => (
                         <button key={v} className={effort === v ? "on" : ""} onClick={() => setEffort(v)}>{v}</button>
                       ))}
                     </div>
+                    <div className="hint">可用档位取决于模型，模型不支持的档位会被 Codex 拒绝；不确定时用 high。</div>
                   </div>
                   <div className="set-row" style={{ boxShadow: "none", marginBottom: 8 }}>
                     <div>

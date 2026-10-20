@@ -28,7 +28,7 @@ import WindowControls from "./Titlebar";
 import ConfirmDialog from "./ConfirmDialog";
 import DeepLinkImportDialog, { type PendingImport } from "./DeepLinkImportDialog";
 import Toasts, { type Toast, type ToastKind } from "./Toasts";
-import { buildClaudeProvider, buildCodexProvider, DEFAULT_CODEX_WIRE_API, isHttpUrl, maskSecret } from "./providerFactory";
+import { buildClaudeProvider, buildCodexProvider, isHttpUrl, maskSecret } from "./providerFactory";
 import { checkForUpdate, installAndRelaunch, type Update } from "./updater";
 import { onOpenUrl, getCurrent } from "@tauri-apps/plugin-deep-link";
 import { listen } from "@tauri-apps/api/event";
@@ -447,7 +447,7 @@ export default function App() {
         const provider =
           appk === "codex"
             ? buildCodexProvider(
-                { id, name: finalName, category: "custom", baseUrl, model: model || "gpt-5.5", wireApi: (q.get("wireApi") as any) || DEFAULT_CODEX_WIRE_API },
+                { id, name: finalName, category: "custom", baseUrl, model: model || "gpt-6.1-sol" },
                 key,
               )
             : buildClaudeProvider(

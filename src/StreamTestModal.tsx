@@ -62,17 +62,20 @@ function configOf(app: AppType, provider: Provider) {
     baseUrl: config.match(/base_url\s*=\s*"([^"]+)"/)?.[1] ?? "",
     apiKey: String(settings?.auth?.OPENAI_API_KEY ?? ""),
     model: config.match(/^model\s*=\s*"([^"]+)"/m)?.[1] ?? "",
-    wireApi: (((provider.meta as any)?.wireApi ??
-      config.match(/wire_api\s*=\s*"([^"]+)"/)?.[1] ??
-      DEFAULT_CODEX_WIRE_API) === "responses"
-      ? "responses"
-      : "chat") as "chat" | "responses",
+    // Codex 只支持 Responses 协议，旧卡片残留的 wire_api 一律忽略。
+    wireApi: DEFAULT_CODEX_WIRE_API as "chat" | "responses",
     apiKeyField: undefined,
   };
 }
 
 export default function StreamTestModal({ app, provider, onClose, onResult }: Props) {
   const config = configOf(app, provider);
+  // Grok CLI 暂无可靠的请求特征，只为 Claude Code / Codex 提供模拟。
+  const canSimulateCli = app === "claude" || app === "codex";
+  const simulateKey = `zsw.simulateCli.${app}.${provider.id}`;
+  const [simulateCli, setSimulateCli] = useState(
+    () => canSimulateCli && localStorage.getItem(simulateKey) === "1",
+  );
   const [model, setModel] = useState(config.model);
   const [models, setModels] = useState<string[]>([]);
   const [modelFetch, setModelFetch] = useState<"idle" | "loading" | "success" | "error">("idle");
@@ -129,6 +132,7 @@ export default function StreamTestModal({ app, provider, onClose, onResult }: Pr
           model: model.trim(),
           wireApi: config.wireApi,
           apiKeyField: config.apiKeyField,
+          simulateCli,
         },
         (event) => {
           if (!mounted.current || event.kind !== "delta" || !event.text) return;
@@ -242,7 +246,24 @@ export default function StreamTestModal({ app, provider, onClose, onResult }: Pr
           )}
         </div>
         <div className="modal-foot">
-          <span />
+          {canSimulateCli ? (
+            <label
+              className="stream-cli-toggle"
+              title={`按 ${app === "claude" ? "Claude Code" : "Codex"} CLI 的请求头与请求体格式发送，适用于只放行官方客户端的中转站`}
+            >
+              <input
+                type="checkbox"
+                checked={simulateCli}
+                disabled={test.phase === "running"}
+                onChange={(event) => {
+                  setSimulateCli(event.target.checked);
+                  if (event.target.checked) localStorage.setItem(simulateKey, "1");
+                  else localStorage.removeItem(simulateKey);
+                }}
+              />
+              模拟 CLI 请求
+            </label>
+          ) : <span />}
           <div className="stream-test-actions">
             <button className="btn" onClick={onClose}>关闭</button>
             <button

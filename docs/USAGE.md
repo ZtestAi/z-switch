@@ -1,6 +1,6 @@
 # z-switch 使用教程
 
-面向 Claude Code 与 Codex 的桌面供应商一键切换器。本教程覆盖从安装到进阶（本地路由代理）的完整流程。
+面向 Claude Code、Codex 与 Grok 的桌面供应商一键切换器。本教程覆盖从安装到进阶（本地路由代理）的完整流程。
 
 > 返回 [项目主页](https://github.com/ZtestAi/z-switch) · 由 [真测 Ztest](https://ztest.ai) 出品
 
@@ -33,7 +33,7 @@
 - **macOS**：`.dmg`（区分 Apple Silicon 与 Intel，请按芯片选择）
 - **Linux**：`.AppImage` 或 `.deb`
 
-> 当前版本尚未做代码签名，Windows SmartScreen 可能提示「未知发布者」，macOS 首次打开需右键 →「打开」。这属于正常现象，详见 [FAQ](#14-常见问题-faq)。
+> 安装包未经 Apple 公证 / 未做 Windows 代码签名：Windows SmartScreen 可能提示「未知发布者」，macOS 首次打开可能提示「已损坏」或「无法验证开发者」。这属于正常现象，处理方法见 [FAQ](#14-常见问题-faq)。
 
 ## 2. 首次启动
 
@@ -45,10 +45,10 @@
 
 ## 3. 界面总览
 
-- **顶部标签页**：在 **Claude Code** 与 **Codex** 两个分区之间切换，各自独立管理供应商。
+- **顶部标签页**：在 **Claude Code**、**Codex** 与 **Grok** 三个分区之间切换，各自独立管理供应商。
 - **右上角工具栏**：
   - **文档** — 打开本教程
-  - **测速** — 一次性测试所有端点的 TCP 延迟
+  - **测速** — 一次性测试所有端点的 HTTP 往返延迟
   - **导入 / 导出** — JSON 形式备份或迁移供应商
   - **设置** — 主题、开机自启、本地路由代理等
   - **添加** — 新建一张供应商卡片
@@ -68,11 +68,18 @@
 
 - **主模型**
 - **Haiku / Sonnet / Opus / Fable** 四个模型档位（分别对应不同用途，留空则用中转站默认）
-- **1M 长上下文** — Sonnet / Opus / Fable 三档可勾选「1M」开关，供应商支持时对该档启用 100 万 token 上下文（做法与 cc-switch 一致：给模型名追加 `[1M]` 标记，不额外写环境变量）。
+- **1M 长上下文** — Claude 5.x 系列（Fable 5.1 / Opus 5.5 / Sonnet 5.5 / Haiku 5.5）原生支持 100 万 token 上下文，**无需勾选**。Sonnet / Opus / Fable 三档的「1M」开关只用于 4.6 等需要 `[1M]` 后缀才启用长上下文的模型（做法与 cc-switch 一致：给模型名追加 `[1M]` 标记，不额外写环境变量）。
 
 ### Codex 供应商
 
-- 选择协议：**`responses`** 或 **`chat`**（按中转站支持情况选择）
+- 协议固定为 **`responses`**：Codex 已于 2026 年 2 月移除 `chat` 协议（`wire_api = "chat"` 会导致 Codex 所有命令启动失败），中转站需提供 `/v1/responses` 接口。
+- 旧版本保存的 `chat` 供应商会在升级后**自动改为 `responses`**，`~/.codex/config.toml` 中残留的 `chat` 也会在启动时修正（修正前先备份）。
+- 高级选项可设置推理强度 `model_reasoning_effort`（low / medium / high / xhigh / max / ultra），可用档位取决于模型。
+
+### Grok 供应商
+
+- 填写 Base URL（写入 `[endpoints].models_base_url`）、API Key 与模型，生成单文件 `~/.grok/config.toml`。
+- Grok 没有本机官方账号卡片，分区初始为空。
 
 保存前可先做 [连通性测试、模型拉取、测速](#6-供应商体检连通性--模型--测速--真实测试)。表单和 **JSON** 两种编辑方式可自由切换，适合高级用户直接粘贴配置。
 
@@ -96,6 +103,7 @@
 - **模型列表拉取** — 从中转站拉取可用模型，便于选择档位。
 - **测速（HTTP 层）** — 向端点发一次真实 HTTP 请求测往返延迟。**刻意不用纯 TCP**：本机若装了 TUN / 透明代理，TCP 握手会被就地应答造成「<1ms」失真，走 HTTP 层才能测到真实上游延迟。
 - **真实测试** — 使用已保存的地址、密钥、模型和协议，向供应商发送一条最小的 `Hi` 请求（最多输出 32 tokens），在独立弹窗中实时显示**回复内容、首字耗时、总耗时**。
+  - **模拟 CLI 请求**（弹窗左下角，Claude / Codex 可用）— 部分中转站的 Key 只放行官方客户端，普通测试会返回 403（如 `this key requires Claude Code CLI`）。勾选后按 Claude Code / Codex CLI 的请求头与请求体格式发送；该选项按卡片记住。做了更严格校验的中转站仍可能拒绝，此时以客户端实际使用为准。
 
 > ⚠️ 真实测试会产生**极少量**模型调用费用。测试内容、模型回复与密钥**不写入任何持久化文件**，结果仅在本次运行中回显到卡片。
 
@@ -130,7 +138,7 @@
 
 **已知限制**：
 
-- 代理**不会**同步改写已落入 live 配置的模型名和 Codex `wire_api`。因此热切换只适用于**模型 / 协议兼容**的供应商；跨模型或跨协议切换仍需**关闭代理后直连切换**。
+- 代理**不会**同步改写已落入 live 配置的模型名。因此热切换只适用于**模型兼容**的供应商；跨模型切换仍需**关闭代理后直连切换**。
 - 目前**不提供**自动重试或故障转移。
 - 该模式仍在持续验证中，建议对稳定性有要求的场景优先使用直连模式。
 
@@ -142,10 +150,11 @@
 - **开机自启**
 - **写入前备份** — 切换写盘前把配置备份到 `~/.z-switch/backups/`
 - **Claude 生态联动** — 让切换同步到 Claude 桌面版 / VS Code 扩展等（见下）
-- **配置目录** — 一键打开 Claude / Codex / z-switch 配置目录（见下）
+- **配置目录** — 一键打开 Claude / Codex / Grok / z-switch 配置目录（见下）
 - **本地路由代理** 及其高级参数（见第 9 节）
 - **错误日志目录** — 一键打开或清空代理错误日志
-- **恢复原始配置** — 分别还原 Claude Code 或 Codex（见第 11 节）
+- **恢复原始配置** — 分别还原 Claude Code、Codex 或 Grok（见第 11 节）
+- **关于** — 查看版本、检查更新；提供 GitHub 仓库与 Releases 下载页的「打开 / 复制链接」，自动更新不可用时可手动下载安装包
 
 ### Claude 生态联动：桌面版 / VS Code 扩展 / 初次确认
 
@@ -161,13 +170,14 @@ z-switch 默认只切 Claude Code CLI（`~/.claude/settings.json`）。设置页
 
 ### 配置目录快捷入口
 
-设置页「配置目录」提供三个按钮，在系统文件管理器中直接打开对应目录，方便手动查看 / 编辑：
+设置页「配置目录」提供四个按钮，在系统文件管理器中直接打开对应目录，方便手动查看 / 编辑：
 
 - **Claude** → `~/.claude`（`settings.json`、`config.json`）
 - **Codex** → `~/.codex`（`auth.json`、`config.toml`）
+- **Grok** → `~/.grok`（`config.toml`）
 - **z-switch** → `~/.z-switch`（`providers.json`、备份、日志）
 
-> 目录不存在时会退回打开用户主目录（不会擅自创建 Claude / Codex 目录）。
+> 目录不存在时会退回打开用户主目录（不会擅自创建 Claude / Codex / Grok 目录）。
 
 ## 11. 恢复原始配置 / 解除管理
 
@@ -197,14 +207,27 @@ z-switch 注册了 `zswitch://import` 深链，网站 / 中转站可以生成这
 | `~/.claude.json` | Claude Code 根配置（`hasCompletedOnboarding`，开启「跳过初次确认」时写入） |
 | `%LOCALAPPDATA%\Claude`、`Claude-3p`（mac 为 `~/Library/Application Support/…`） | Claude 桌面版配置（开启「桌面版随切换」时写 3p 网关 profile） |
 | `~/.codex/auth.json`、`~/.codex/config.toml` | Codex 客户端配置（直连模式写入） |
+| `~/.grok/config.toml` | Grok 客户端配置（直连模式写入） |
 | `~/.z-switch/original/` | 首次运行保存的原始配置快照 |
 | `~/.z-switch/backups/` | 每次写入前的时间戳备份 |
 | `~/.z-switch/logs/proxy-errors.jsonl` | 本地代理的脱敏错误日志 |
 
 ## 14. 常见问题 FAQ
 
-**Q：Windows 提示「Windows 已保护你的电脑」/ macOS 说「无法打开」怎么办？**
-A：当前版本未做代码签名。Windows 上点「更多信息 → 仍要运行」；macOS 上在应用图标右键 →「打开」，或到「系统设置 → 隐私与安全性」允许。后续版本会考虑加入代码签名。
+**Q：macOS 提示「“z-switch”已损坏，无法打开。你应该将它移到废纸篓」怎么办？**
+A：应用并未损坏。安装包使用 ad-hoc 签名、未经 Apple 公证，从浏览器下载后会被系统加上隔离标记。把 z-switch 拖进「应用程序」后，打开「终端」执行：
+
+```bash
+xattr -dr com.apple.quarantine /Applications/z-switch.app
+```
+
+之后即可正常打开。若提示的是「无法验证开发者」，也可以先双击一次，再到「系统设置 → 隐私与安全性」底部点「仍要打开」（macOS 15 起右键 →「打开」已不再能绕过）。
+
+**Q：Windows 提示「Windows 已保护你的电脑」怎么办？**
+A：安装包未做代码签名。点「更多信息 → 仍要运行」即可。
+
+**Q：Codex 报错 `wire_api = "chat"` 不再支持？**
+A：Codex 已移除 `chat` 协议。升级到 z-switch v0.3.1 及以上后，启动时会自动把供应商和 `~/.codex/config.toml` 里的 `chat` 改为 `responses`（改前备份到 `~/.z-switch/backups/`）。如果中转站只提供 `/v1/chat/completions`、没有 `/v1/responses`，则无法再用于 Codex，请联系中转站或更换供应商。
 
 **Q：切换后没生效？**
 A：Claude Code 通常在下一次请求时生效；Codex CLI 需要重启。若仍无效，检查该卡片的 Base URL / 密钥是否正确，可用「连通性测试」验证。
@@ -214,6 +237,12 @@ A：**顶层字段（如 `statusLine`、`hooks`、`permissions` 等）始终保�
 
 **Q：真实测试会不会泄露我的密钥或对话？**
 A：不会。测试内容、模型回复与 API Key 不写入任何持久化文件，只在本次运行内回显。
+
+**Q：真实测试返回 403，提示 `this key requires Claude Code CLI` 之类？**
+A：部分中转站的 Key 只放行官方客户端，Key 本身通常没问题。在真实测试弹窗左下角勾选「**模拟 CLI 请求**」后重试（Claude / Codex 可用，按卡片记住）。若仍被拒，说明中转站校验更严格，以 Claude Code / Codex 客户端里的实际使用为准。
+
+**Q：「检查更新」失败 / 无法自动更新？**
+A：自动更新需要访问 GitHub。网络受限时，到「设置 → 关于」点「手动下载新版本」的「打开」或「复制链接」，从 [Releases](https://github.com/ZtestAi/z-switch/releases/latest) 下载安装包直接覆盖安装即可，供应商与配置保存在 `~/.z-switch/`，不会丢失。
 
 **Q：本地路由代理和直连模式该用哪个？**
 A：日常推荐**直连模式**（稳定、零中间层）。只有当你需要在客户端运行期间频繁热切换、且供应商之间模型/协议兼容时，再考虑开启**本地路由代理**。

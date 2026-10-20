@@ -363,6 +363,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .stream-model-refresh.loading .ui-icon { animation: spin .8s linear infinite; }
 .stream-model-error { color: var(--danger); overflow-wrap: anywhere; }
 .stream-test-actions { display: flex; gap: 8px; }
+.stream-cli-toggle { display: inline-flex; align-items: center; gap: 6px; color: var(--fg-muted); font-size: var(--text-sm); cursor: pointer; user-select: none; white-space: nowrap; }
+.stream-cli-toggle input { flex: none; width: auto; min-width: 0; margin: 0; cursor: pointer; }
+.stream-cli-toggle:has(input:checked) { color: var(--accent-text); }
+.stream-cli-toggle:has(input:disabled) { cursor: not-allowed; opacity: .6; }
 .stream-test-actions .btn { white-space: nowrap; }
 .stream-test-actions .btn:disabled { cursor: not-allowed; opacity: .5; }
 .real-test-output { min-height: 0; margin-top: 9px; padding: 9px 10px; border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: var(--r-sm); background: var(--bg-soft); display: flex; flex-direction: column; }
@@ -418,6 +422,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .config-dir-row { display: block; }
 .dir-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .dir-actions .folder-btn { flex: 1 1 auto; justify-content: center; }
+.about-actions { flex: none; display: flex; gap: 8px; }
+.about-actions .btn { white-space: nowrap; }
 .original-config-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .snapshot-time { flex: none; display: inline-flex; align-items: center; gap: 5px; color: var(--fg-muted); font-family: var(--mono); font-size: var(--text-xs); line-height: 1.4; }
 .snapshot-time .ui-icon { width: 12px; height: 12px; }

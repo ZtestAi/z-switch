@@ -41,13 +41,14 @@ const ENTERPRISE_KEYS: &[&str] = &[
 ];
 
 /// 默认写入桌面版模型菜单的 4 档 claude 路由 + 是否标 `supports1m`。
-/// 只给真正支持 100 万上下文的档位标 1M（对齐真机已应用的 ccsw 配置：仅 opus），
-/// 避免给不支持的档位暴露会报错的 1M 选项。跟随供应商时纯透传，不做名称映射。
+/// 第一项为默认模型。5.x 系列原生 1M，桌面版能按模型 ID 识别，无需再标 supports1m
+/// （该标记只用于桌面版不认识的模型 ID，会额外多出一个 1M 菜单项）。
+/// 跟随供应商时纯透传，不做名称映射。
 const DEFAULT_ROUTES: &[(&str, bool)] = &[
-    ("claude-sonnet-4-6", false),
-    ("claude-opus-4-8", true),
-    ("claude-haiku-4-5", false),
-    ("claude-fable-5", false),
+    ("claude-sonnet-5-5", false),
+    ("claude-opus-5-5", false),
+    ("claude-haiku-5-5", false),
+    ("claude-fable-5-1", false),
 ];
 
 #[derive(Debug, Clone)]
@@ -123,7 +124,7 @@ pub fn restore_official() -> Result<(), String> {
 fn build_profile(base_url: &str, api_key: &str) -> Value {
     // labelOverride 与 name 同值：桌面版菜单直接显示官方模型名。真机上每个
     // inferenceModels 条目都带 labelOverride，这里对齐已验证的 profile 形状；
-    // supports1m 仅在支持的档位（opus）出现，其它档不写该键。
+    // supports1m 只在 DEFAULT_ROUTES 标记的档位出现，其它档不写该键。
     let models: Vec<Value> = DEFAULT_ROUTES
         .iter()
         .map(|(id, one_m)| {
@@ -513,14 +514,19 @@ mod tests {
 
         let models = profile["inferenceModels"].as_array().unwrap();
         assert_eq!(models.len(), 4);
-        // 每档 name==labelOverride；supports1m 仅出现在 opus 档（对齐真机配置）。
+        // 每档 name==labelOverride；5.x 原生 1M，任何档位都不写 supports1m。
         assert!(models.iter().all(|m| m["name"] == m["labelOverride"]));
-        let find = |id: &str| models.iter().find(|m| m["name"] == json!(id)).unwrap();
-        assert_eq!(find("claude-opus-4-8")["supports1m"], json!(true));
-        assert!(find("claude-sonnet-4-6").get("supports1m").is_none());
-        assert!(find("claude-haiku-4-5").get("supports1m").is_none());
-        assert!(find("claude-fable-5").get("supports1m").is_none());
-        assert_eq!(models[0]["name"], json!("claude-sonnet-4-6"));
+        assert!(models.iter().all(|m| m.get("supports1m").is_none()));
+        let names: Vec<&str> = models.iter().filter_map(|m| m["name"].as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "claude-sonnet-5-5",
+                "claude-opus-5-5",
+                "claude-haiku-5-5",
+                "claude-fable-5-1"
+            ]
+        );
 
         assert_eq!(meta["appliedId"], json!(PROFILE_ID));
         assert!(meta["entries"]

@@ -10,6 +10,11 @@ const MAX_OUTPUT_TOKENS: u32 = 32;
 const MAX_CAPTURE_CHARS: usize = 2_000;
 const MAX_ERROR_CHARS: usize = 240;
 
+/// 「模拟 CLI 请求」使用的客户端版本号；部分中转站只放行官方 CLI，按需随官方发版更新。
+const CLAUDE_CLI_VERSION: &str = "2.1.304";
+const CODEX_CLI_VERSION: &str = "0.163.0";
+const CLAUDE_CODE_SYSTEM_PROMPT: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamTestEvent {
@@ -102,7 +107,93 @@ fn endpoint(base_url: &str, app: &str, wire_api: &str) -> Result<String, String>
     }
 }
 
-fn request_body(app: &str, wire_api: &str, model: &str) -> Value {
+fn random_hex(len: usize) -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    let mut out = String::with_capacity(len + 16);
+    while out.len() < len {
+        let mut hasher = RandomState::new().build_hasher();
+        hasher.write_u128(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or_default(),
+        );
+        out.push_str(&format!("{:016x}", hasher.finish()));
+    }
+    out.truncate(len);
+    out
+}
+
+fn random_uuid() -> String {
+    let hex = random_hex(30);
+    format!(
+        "{}-{}-4{}-a{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..15],
+        &hex[15..18],
+        &hex[18..30]
+    )
+}
+
+/// 按 Claude Code CLI 的格式构造请求体：带官方 system 提示词与 metadata.user_id。
+fn claude_cli_body(model: &str) -> Value {
+    serde_json::json!({
+        "model": model,
+        "max_tokens": MAX_OUTPUT_TOKENS,
+        "stream": true,
+        "system": [{
+            "type": "text",
+            "text": CLAUDE_CODE_SYSTEM_PROMPT,
+            "cache_control": { "type": "ephemeral" }
+        }],
+        "messages": [{
+            "role": "user",
+            "content": [{ "type": "text", "text": "Hi" }]
+        }],
+        "metadata": {
+            "user_id": format!("user_{}_account__session_{}", random_hex(64), random_uuid())
+        }
+    })
+}
+
+/// 按 Codex CLI 的格式构造 Responses 请求体。
+fn codex_cli_body(model: &str) -> Value {
+    serde_json::json!({
+        "model": model,
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{ "type": "input_text", "text": "Hi" }]
+        }],
+        "max_output_tokens": MAX_OUTPUT_TOKENS,
+        "store": false,
+        "stream": true
+    })
+}
+
+fn platform_names() -> (&'static str, &'static str) {
+    let os = match std::env::consts::OS {
+        "windows" => "Windows",
+        "macos" => "MacOS",
+        _ => "Linux",
+    };
+    let arch = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        _ => "x64",
+    };
+    (os, arch)
+}
+
+fn request_body(app: &str, wire_api: &str, model: &str, simulate_cli: bool) -> Value {
+    if simulate_cli {
+        match (app, wire_api) {
+            ("claude", _) => return claude_cli_body(model),
+            ("codex", "responses") => return codex_cli_body(model),
+            _ => {}
+        }
+    }
     match (app, wire_api) {
         ("claude", _) => serde_json::json!({
             "model": model,
@@ -230,6 +321,40 @@ fn append_text(
     });
 }
 
+/// 附加官方 CLI 的识别请求头（Claude Code / Codex），用于只放行官方客户端的中转站。
+fn cli_headers(request: reqwest::RequestBuilder, app: &str) -> reqwest::RequestBuilder {
+    let (os, arch) = platform_names();
+    match app {
+        "claude" => request
+            .header(
+                reqwest::header::USER_AGENT,
+                format!("claude-cli/{CLAUDE_CLI_VERSION} (external, cli)"),
+            )
+            .header("x-app", "cli")
+            .header(
+                "anthropic-beta",
+                "claude-code-20250219,interleaved-thinking-2025-05-14",
+            )
+            .header("anthropic-dangerous-direct-browser-access", "true")
+            .header("x-stainless-lang", "js")
+            .header("x-stainless-runtime", "node")
+            .header("x-stainless-os", os)
+            .header("x-stainless-arch", arch)
+            .header("x-stainless-retry-count", "0"),
+        "codex" => request
+            .header(
+                reqwest::header::USER_AGENT,
+                format!("codex_cli_rs/{CODEX_CLI_VERSION} ({os}; {arch})"),
+            )
+            .header("originator", "codex_cli_rs")
+            .header("version", CODEX_CLI_VERSION)
+            .header("OpenAI-Beta", "responses=experimental")
+            .header("session_id", random_uuid()),
+        _ => request,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     app: &str,
     base_url: &str,
@@ -237,6 +362,7 @@ pub async fn run(
     model: &str,
     wire_api: &str,
     api_key_field: Option<&str>,
+    simulate_cli: bool,
     on_event: Channel<StreamTestEvent>,
 ) -> Result<StreamTestResult, String> {
     if api_key.trim().is_empty() {
@@ -252,9 +378,10 @@ pub async fn run(
         .build()
         .map_err(|error| format!("创建测试客户端失败：{error}"))?;
 
-    let mut request = client
-        .post(&url)
-        .json(&request_body(app, wire_api, model.trim()));
+    let mut request =
+        client
+            .post(&url)
+            .json(&request_body(app, wire_api, model.trim(), simulate_cli));
     if app == "claude" {
         request = request.header("anthropic-version", "2023-06-01");
         if api_key_field == Some("ANTHROPIC_API_KEY") {
@@ -264,6 +391,9 @@ pub async fn run(
         }
     } else {
         request = request.bearer_auth(api_key.trim());
+    }
+    if simulate_cli {
+        request = cli_headers(request, app);
     }
 
     let _ = on_event.send(StreamTestEvent {
@@ -434,6 +564,7 @@ mod tests {
                 "test-model",
                 "chat",
                 None,
+                false,
                 channel,
             )
             .await
@@ -442,6 +573,69 @@ mod tests {
             assert_eq!(result.text, "Hi!");
             assert!(result.streamed);
             assert!(result.total_ms >= result.first_token_ms);
+        });
+    }
+
+    #[test]
+    fn simulate_cli_sends_claude_code_headers_and_body() {
+        const FORBIDDEN_BODY: &str = r#"{"error":{"message":"this key requires Claude Code CLI"}}"#;
+        const OK_EVENT: &str =
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"OK\"}}\n\n";
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            use axum::{
+                body::Body,
+                http::{header, HeaderMap, Response, StatusCode},
+                routing::post,
+                Json, Router,
+            };
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            // 模拟只放行 Claude Code CLI 的中转站。
+            let app = Router::new().route(
+                "/v1/messages",
+                post(|headers: HeaderMap, Json(body): Json<Value>| async move {
+                    let ua = headers
+                        .get(header::USER_AGENT)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or("");
+                    let from_cli = ua.starts_with("claude-cli/")
+                        && headers.get("x-app").is_some_and(|value| value == "cli")
+                        && body.pointer("/system/0/text").and_then(Value::as_str)
+                            == Some(CLAUDE_CODE_SYSTEM_PROMPT)
+                        && body
+                            .pointer("/metadata/user_id")
+                            .and_then(Value::as_str)
+                            .is_some_and(|id| id.starts_with("user_") && id.len() > 100);
+                    if !from_cli {
+                        return Response::builder()
+                            .status(StatusCode::FORBIDDEN)
+                            .body(Body::from(FORBIDDEN_BODY))
+                            .unwrap();
+                    }
+                    Response::builder()
+                        .header(header::CONTENT_TYPE, "text/event-stream")
+                        .body(Body::from(OK_EVENT))
+                        .unwrap()
+                }),
+            );
+            tauri::async_runtime::spawn(async move {
+                let _ = axum::serve(listener, app).await;
+            });
+
+            let base = format!("http://{address}");
+            let noop = || Channel::new(|_| Ok(()));
+            let plain = run("claude", &base, "k", "m", "chat", None, false, noop()).await;
+            assert!(plain.err().is_some_and(|error| error.contains("HTTP 403")));
+
+            let simulated = run("claude", &base, "k", "m", "chat", None, true, noop())
+                .await
+                .unwrap();
+            assert_eq!(simulated.text, "OK");
         });
     }
 }

@@ -1,6 +1,11 @@
 import type { Provider } from "./types";
 
+/** Codex 只支持 Responses 协议（2026-02 起已移除 chat，openai/codex#10157）。 */
 export const DEFAULT_CODEX_WIRE_API = "responses" as const;
+
+/** Codex 推理强度档位；实际可用档位取决于所选模型。 */
+export const CODEX_REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max", "ultra"] as const;
+export type CodexReasoningEffort = (typeof CODEX_REASONING_EFFORTS)[number];
 
 export interface ClaudeProviderInput {
   id: string;
@@ -22,8 +27,7 @@ export interface CodexProviderInput {
   category: string;
   baseUrl: string;
   model: string;
-  wireApi: "responses" | "chat";
-  reasoningEffort?: "low" | "medium" | "high";
+  reasoningEffort?: CodexReasoningEffort;
   disableResponseStorage?: boolean;
   requiresOpenaiAuth?: boolean;
   contextWindow?: number;
@@ -38,30 +42,6 @@ export interface GrokProviderInput {
   model: string;
   contextWindow?: number;
   apiBackend?: "responses" | "chat";
-}
-
-export function inferWireApi(baseUrl: string): "responses" | "chat" | null {
-  const url = baseUrl.toLowerCase();
-  if (!url) return null;
-
-  const responsesHosts = [
-    "xiaomimimo.com",
-    "minimaxi.com",
-    "longcat.chat",
-    "dashscope.aliyuncs.com",
-    "/api/v3",
-  ];
-  if (responsesHosts.some((host) => url.includes(host))) return "responses";
-
-  const chatHosts = [
-    "deepseek.com",
-    "bigmodel.cn",
-    "moonshot.cn",
-    "stepfun.com",
-    "qianfan.baidubce.com",
-  ];
-  if (chatHosts.some((host) => url.includes(host))) return "chat";
-  return null;
 }
 
 /**
@@ -170,7 +150,7 @@ export function buildCodexProvider(
     "[model_providers.custom]",
     `name = ${tomlString(input.name)}`,
     `base_url = ${tomlString(input.baseUrl)}`,
-    `wire_api = ${tomlString(input.wireApi)}`,
+    `wire_api = ${tomlString(DEFAULT_CODEX_WIRE_API)}`,
     `requires_openai_auth = ${input.requiresOpenaiAuth ?? false}`,
   ];
   if (input.contextWindow && input.contextWindow > 0) {
@@ -185,7 +165,7 @@ export function buildCodexProvider(
       auth: { OPENAI_API_KEY: apiKey },
       config: lines.join("\n") + "\n",
     },
-    meta: { wireApi: input.wireApi },
+    meta: { wireApi: DEFAULT_CODEX_WIRE_API },
   };
 }
 

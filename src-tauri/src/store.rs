@@ -1,5 +1,5 @@
 //! providers.json 数据模型 + 读写。
-//! 只存耐久配置；测速/验真等 runtime 状态不进此文件（见 design/数据结构.md）。
+//! 只存耐久配置；测速等 runtime 状态不进此文件。
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -96,7 +96,7 @@ pub struct Root {
     pub version: u32,
     /// "claude" / "codex"
     pub apps: HashMap<String, AppData>,
-    /// 全局设置（主题 / 备份 / 可靠性层 / 验真预留）
+    /// 全局设置（主题 / 备份 / 可靠性层）
     #[serde(default)]
     pub settings: Value,
 }
@@ -142,8 +142,7 @@ impl Root {
                     "tcpKeepaliveSeconds": 60,
                     "proxyErrorLogEnabled": true,
                     "proxyErrorLogMaxMb": 5
-                },
-                "ztest": { "connected": false }
+                }
             }),
         }
     }
@@ -244,6 +243,16 @@ impl Root {
                     root.insert("auth".into(), sanitized);
                     changed = true;
                 }
+                if migrate_codex_provider_wire_api(provider) {
+                    changed = true;
+                }
+            }
+        }
+
+        // 清理旧版本写入的 ztest.ai 验真预留字段（功能已取消）。
+        if let Some(settings) = self.settings.as_object_mut() {
+            if settings.remove("ztest").is_some() {
+                changed = true;
             }
         }
 
@@ -257,6 +266,29 @@ impl Root {
                 .any(|provider| !is_official_provider(provider))
         })
     }
+}
+
+/// Codex 已移除 `wire_api = "chat"`：把供应商 config 与 meta 中的 chat 统一改为
+/// responses。返回是否有改动。用于启动迁移、导入以及保存（JSON 模式可能手填 chat）。
+pub fn migrate_codex_provider_wire_api(provider: &mut Provider) -> bool {
+    let mut changed = false;
+    if let Some(root) = provider.settings_config.as_object_mut() {
+        let migrated = root
+            .get("config")
+            .and_then(Value::as_str)
+            .and_then(crate::live::migrate_codex_wire_api);
+        if let Some(config) = migrated {
+            root.insert("config".into(), Value::String(config));
+            changed = true;
+        }
+    }
+    if let Some(meta) = provider.meta.as_object_mut() {
+        if meta.get("wireApi").and_then(Value::as_str) == Some("chat") {
+            meta.insert("wireApi".into(), json!("responses"));
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// 载入 providers.json；不存在则创建空列表，首次导入由启动流程处理。
@@ -327,6 +359,37 @@ mod tests {
             json!({ "OPENAI_API_KEY": "relay-key" })
         );
         assert_eq!(auth_of(&root, CODEX_OFFICIAL_PROVIDER_ID), json!({}));
+    }
+
+    #[test]
+    fn migration_rewrites_codex_chat_wire_api_and_drops_ztest() {
+        let mut root = Root::default_seeded();
+        root.settings["ztest"] = json!({ "connected": false });
+        root.apps.get_mut("codex").unwrap().providers.insert(
+            "deepseek".into(),
+            Provider {
+                id: "deepseek".into(),
+                name: "DeepSeek".into(),
+                category: Some("custom".into()),
+                settings_config: json!({
+                    "auth": { "OPENAI_API_KEY": "k" },
+                    "config": "[model_providers.custom]\nwire_api = \"chat\"\n"
+                }),
+                meta: json!({ "wireApi": "chat" }),
+                failover: json!({}),
+            },
+        );
+
+        assert!(root.ensure_official_providers());
+        let provider = &root.apps["codex"].providers["deepseek"];
+        assert_eq!(
+            provider.settings_config["config"],
+            "[model_providers.custom]\nwire_api = \"responses\"\n"
+        );
+        assert_eq!(provider.meta["wireApi"], "responses");
+        assert!(root.settings.get("ztest").is_none());
+        // 迁移是幂等的：再跑一次不应报告改动。
+        assert!(!root.ensure_official_providers());
     }
 
     fn auth_of(root: &Root, id: &str) -> Value {

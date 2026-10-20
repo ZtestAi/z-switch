@@ -5,8 +5,8 @@
 
 ## 🔴 高优先级
 
-- [ ] **本地路由：热切换时同步改写模型名与 Codex `wire_api`**
-      当前开启代理后，已落入 live 配置的模型名 / `wire_api` 不会随切换更新，导致跨模型 / 跨协议热切换不可用。
+- [ ] **本地路由：热切换时同步改写模型名**
+      当前开启代理后，已落入 live 配置的模型名不会随切换更新，导致跨模型热切换不可用。（Codex 已统一为 responses 协议，不再有跨协议问题。）
 - [ ] **本地路由：自动重试 / 故障转移**
       目前上游失败直接透传，无重试、无 failover。
 - [ ] **补充可持续验证的真实供应商用例**
@@ -16,14 +16,14 @@
 
 - [ ] **全局 env / 公共配置合并**（详见「已知限制」1）
       让部分 env 变量（Claude）/ 公共段（Codex）可跨供应商共享，而不是 per-provider 记忆。
-- [ ] **ztest.ai 验真功能接入**（设置页已预留后续版本提示）
 - [ ] **首启引导 / 空状态优化**，降低新用户上手成本。
 
 ## 🟢 低优先级 / 打磨
 
 - [ ] 供应商卡片批量操作（批量测速 / 批量删除）
 - [ ] 深色主题细节走查
-- [ ] i18n（英文 README 与界面文案）
+- [~] i18n：README 已增加英文简介，界面文案待做
+- [ ] 模型列表拉取 / 连通性测试支持「模拟 CLI 请求」（目前仅真实测试支持，只放行官方客户端的中转站拉模型可能失败）
 
 ## ⚠️ 已知限制 / 待观察
 
@@ -52,3 +52,13 @@
 - [x] **浏览器一键添加供应商**：`zswitch://import` 深链加固（确认弹窗 + http(s) 校验 + 密钥脱敏 + 同名不覆盖），附 `docs/DEEPLINK.md` 规范与 `docs/deeplink.html` 生成页
 - [x] **Claude 桌面版随切换生效**（独立聊天 App，写 3p 网关 profile；代理跟随 / 直连两模式；仅 macOS/Windows，未装 App 时 no-op；schema 已用真机 dump 核对） — *待真机验证激活*
 - [x] 同步更新 README / USAGE 文档至以上能力
+
+### v0.3.1
+
+- [x] **Codex 适配 responses-only**：上游移除 `wire_api = "chat"`，供应商与 `~/.codex/config.toml` 启动时自动迁移（写前备份），表单移除协议选项；推理强度支持 low ~ ultra
+- [x] **Claude 5.x 模型**：默认模型与桌面版路由更新为 5.x（原生 1M），`[1M]` 标记仅旧模型需要
+- [x] **macOS ad-hoc 签名**，修复 Apple Silicon 提示「已损坏」（#1），Release 说明补充 macOS / Windows 安装指引
+- [x] 真实测试新增「**模拟 CLI 请求**」（Claude Code / Codex），适配只放行官方客户端的中转站
+- [x] 关于页新增项目介绍、GitHub 仓库与 Releases 下载链接（打开 / 复制），自动更新失败时可手动下载
+- [x] 移除 ztest.ai 验真预留；`npm audit fix`；CI Node 升级到 22
+- [x] LICENSE 合并为标准 MIT 格式（GitHub 可识别），README 增加英文简介与 Star History

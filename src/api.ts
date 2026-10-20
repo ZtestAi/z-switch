@@ -90,6 +90,13 @@ export const openConfigDir = (kind: "claude" | "codex" | "grok" | "app") =>
 
 /** 使用系统默认浏览器打开项目使用帮助 */
 export const openHelpDocument = () => invoke<void>("open_help_document");
+/** 项目页面地址；打不开 GitHub 的用户可复制后自行访问 */
+export const PROJECT_LINKS = {
+  repo: "https://github.com/ZtestAi/z-switch",
+  releases: "https://github.com/ZtestAi/z-switch/releases/latest",
+} as const;
+export const openProjectLink = (kind: keyof typeof PROJECT_LINKS) =>
+  invoke<void>("open_project_link", { kind });
 
 /** 打开本地路由错误日志目录 */
 export const openProxyLogFolder = () => invoke<void>("open_proxy_log_folder");
@@ -135,6 +142,8 @@ interface StreamTestInput {
   model: string;
   wireApi: "chat" | "responses";
   apiKeyField?: "ANTHROPIC_AUTH_TOKEN" | "ANTHROPIC_API_KEY";
+  /** 按官方 CLI（Claude Code / Codex）的请求头与请求体格式发送 */
+  simulateCli?: boolean;
 }
 
 /** 真实发送一条 `Hi` 并实时接收供应商的流式模型回复 */
@@ -146,6 +155,7 @@ export function testStream(
   return invoke<StreamTestResult>("test_stream", {
     ...input,
     apiKeyField: input.apiKeyField ?? null,
+    simulateCli: input.simulateCli ?? false,
     onEvent: channel,
   });
 }

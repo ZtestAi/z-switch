@@ -188,10 +188,13 @@ fn save_provider(
     app_handle: AppHandle,
     state: State<AppState>,
     app: String,
-    provider: Provider,
+    mut provider: Provider,
 ) -> Result<Root, String> {
     let mut root = state.0.lock().unwrap();
     let backup = backup_flag(&root);
+    if app == "codex" {
+        store::migrate_codex_provider_wire_api(&mut provider);
+    }
     let data = root.apps.entry(app.clone()).or_default();
     let id = provider.id.clone();
     if id.trim().is_empty() {
@@ -361,23 +364,36 @@ fn open_backups_folder() -> Result<(), String> {
         .map_err(|error| format!("打开备份目录 {} 失败：{error}", path.display()))
 }
 
+const REPO_URL: &str = "https://github.com/ZtestAi/z-switch";
+
+/// 用系统默认浏览器打开链接（跨平台）。只传代码内固定的地址，不对前端开放任意 URL。
+fn open_in_browser(url: &str) -> std::io::Result<()> {
+    #[cfg(target_os = "windows")]
+    let result = std::process::Command::new("explorer.exe").arg(url).spawn();
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(target_os = "linux")]
+    let result = std::process::Command::new("xdg-open").arg(url).spawn();
+
+    result.map(|_| ())
+}
+
 /// 使用系统默认浏览器打开版本可追踪的使用帮助。
 #[tauri::command]
 fn open_help_document() -> Result<(), String> {
-    const HELP_URL: &str = "https://github.com/ZtestAi/z-switch/blob/master/docs/USAGE.md";
-
-    #[cfg(target_os = "windows")]
-    let result = std::process::Command::new("explorer.exe")
-        .arg(HELP_URL)
-        .spawn();
-    #[cfg(target_os = "macos")]
-    let result = std::process::Command::new("open").arg(HELP_URL).spawn();
-    #[cfg(target_os = "linux")]
-    let result = std::process::Command::new("xdg-open").arg(HELP_URL).spawn();
-
-    result
-        .map(|_| ())
+    open_in_browser(&format!("{REPO_URL}/blob/master/docs/USAGE.md"))
         .map_err(|error| format!("打开使用帮助失败：{error}"))
+}
+
+/// 使用系统默认浏览器打开项目页面：repo 仓库首页 / releases 最新版本下载页。
+#[tauri::command]
+fn open_project_link(kind: String) -> Result<(), String> {
+    let url = match kind.as_str() {
+        "repo" => REPO_URL.to_string(),
+        "releases" => format!("{REPO_URL}/releases/latest"),
+        other => return Err(format!("未知链接：{other}")),
+    };
+    open_in_browser(&url).map_err(|error| format!("打开链接失败：{error}"))
 }
 
 #[tauri::command]
@@ -838,6 +854,7 @@ async fn test_connectivity(
 
 /// 使用编辑页当前配置发送一条真实的最小流式模型请求。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn test_stream(
     app: String,
     base_url: String,
@@ -845,6 +862,7 @@ async fn test_stream(
     model: String,
     wire_api: String,
     api_key_field: Option<String>,
+    simulate_cli: Option<bool>,
     on_event: tauri::ipc::Channel<stream_test::StreamTestEvent>,
 ) -> Result<stream_test::StreamTestResult, String> {
     stream_test::run(
@@ -854,6 +872,7 @@ async fn test_stream(
         &model,
         &wire_api,
         api_key_field.as_deref(),
+        simulate_cli.unwrap_or(false),
         on_event,
     )
     .await
@@ -1213,6 +1232,11 @@ pub fn run() {
         eprintln!("[z-switch] 补采 grok 原始配置失败：{error}");
     }
 
+    // 原始快照之后再修：live 里残留的 wire_api = "chat" 会让 Codex 所有命令报错。
+    if let Err(error) = live::repair_codex_live_wire_api(backup_flag(&root)) {
+        eprintln!("[z-switch] 修正 Codex wire_api 失败：{error}");
+    }
+
     let initial_import_done = root
         .settings
         .get("initialImportDone")
@@ -1340,6 +1364,7 @@ pub fn run() {
             open_backups_folder,
             open_config_dir,
             open_help_document,
+            open_project_link,
             open_proxy_log_folder,
             clear_proxy_error_log,
             restore_original,

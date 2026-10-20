@@ -67,12 +67,6 @@
             <option value="ANTHROPIC_AUTH_TOKEN">ANTHROPIC_AUTH_TOKEN</option>
             <option value="ANTHROPIC_API_KEY">ANTHROPIC_API_KEY</option>
           </select></div>
-        <div><label>wireApi（Codex）</label>
-          <select id="wireApi">
-            <option value="">默认</option>
-            <option value="responses">responses</option>
-            <option value="chat">chat</option>
-          </select></div>
       </div>
       <div class="row" style="margin-top:10px">
         <div><label>haiku</label><input id="haiku" /></div>
@@ -98,7 +92,7 @@
 
 <script>
   const $ = (id) => document.getElementById(id);
-  const ids = ["app","name","baseUrl","key","model","apiKeyField","wireApi","haiku","sonnet","opus","fable","b64"];
+  const ids = ["app","name","baseUrl","key","model","apiKeyField","haiku","sonnet","opus","fable","b64"];
   function build() {
     const app = $("app").value;
     const p = new URLSearchParams();
@@ -118,8 +112,6 @@
       add("sonnet", $("sonnet").value.trim());
       add("opus", $("opus").value.trim());
       add("fable", $("fable").value.trim());
-    } else {
-      add("wireApi", $("wireApi").value);
     }
     return "zswitch://import?" + p.toString();
   }

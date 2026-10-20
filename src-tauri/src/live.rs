@@ -233,6 +233,51 @@ fn sanitize_codex_official_config(config_text: &str) -> String {
     }
 }
 
+/// Codex 已于 2026-02 移除 `wire_api = "chat"`（openai/codex#10157），且启动时会校验
+/// 全部 `[model_providers.*]`：残留一处 chat 就会让所有命令报错。把每个 chat 改写为
+/// responses，其余文本（含缩进与行尾）原样保留；没有需要改的返回 None。
+pub fn migrate_codex_wire_api(config_text: &str) -> Option<String> {
+    fn is_chat_wire_api(line: &str) -> bool {
+        let Some((key, value)) = line.trim().split_once('=') else {
+            return false;
+        };
+        let value = value.split('#').next().unwrap_or("").trim();
+        key.trim() == "wire_api" && value.trim_matches(['"', '\'']) == "chat"
+    }
+
+    let mut changed = false;
+    let mut out = String::with_capacity(config_text.len());
+    for line in config_text.split_inclusive('\n') {
+        let body = line.trim_end_matches(['\r', '\n']);
+        if is_chat_wire_api(body) {
+            let indent = &body[..body.len() - body.trim_start().len()];
+            out.push_str(indent);
+            out.push_str("wire_api = \"responses\"");
+            out.push_str(&line[body.len()..]);
+            changed = true;
+        } else {
+            out.push_str(line);
+        }
+    }
+    changed.then_some(out)
+}
+
+/// 修正当前 `~/.codex/config.toml` 里残留的 `wire_api = "chat"`，返回是否改动了文件。
+pub fn repair_codex_live_wire_api(backup: bool) -> Result<bool, String> {
+    let path = config::get_codex_config_path();
+    let Ok(text) = fs::read_to_string(&path) else {
+        return Ok(false);
+    };
+    let Some(migrated) = migrate_codex_wire_api(&text) else {
+        return Ok(false);
+    };
+    if backup {
+        backup_file(&path, "codex-config");
+    }
+    config::write_text_file(&path, &migrated)?;
+    Ok(true)
+}
+
 /// 官方卡片首次出现时，从 live 中提取非敏感、非中转的公共配置。
 /// 只填充空白种子，避免每次启动时被当前中转配置覆盖。
 pub fn hydrate_official_provider(app: &str, provider: &mut Provider) -> bool {
@@ -331,6 +376,9 @@ pub fn write_live(app: &str, provider: &Provider, backup: bool) -> Result<(), St
                 .to_string();
             if official {
                 cfg = sanitize_codex_official_config(&cfg);
+            }
+            if let Some(migrated) = migrate_codex_wire_api(&cfg) {
+                cfg = migrated;
             }
             write_codex_live(&auth, &cfg, backup)
         }
@@ -448,6 +496,7 @@ pub fn import_codex() -> Option<Provider> {
     if cfg.trim().is_empty() {
         return None;
     }
+    let cfg = migrate_codex_wire_api(&cfg).unwrap_or(cfg);
     // 从 config.toml 抓 base_url / wire_api 做元数据与命名（best-effort 正则式扫描）
     let base = cfg
         .lines()
@@ -541,6 +590,28 @@ command = "docs"
         assert!(output.get("ANTHROPIC_BASE_URL").is_none());
         assert!(output.get("ANTHROPIC_AUTH_TOKEN").is_none());
         assert_eq!(output["API_TIMEOUT_MS"], "600000");
+    }
+
+    #[test]
+    fn codex_wire_api_chat_is_migrated_in_every_provider_table() {
+        let input = "model_provider = \"custom\"\r\n\
+                     [model_providers.custom]\r\n\
+                     wire_api = \"chat\"\r\n\
+                     [model_providers.old]\n  wire_api='chat' # legacy\nname = \"chat\"\n";
+        let output = migrate_codex_wire_api(input).expect("含 chat 时应改写");
+        assert_eq!(
+            output,
+            "model_provider = \"custom\"\r\n\
+             [model_providers.custom]\r\n\
+             wire_api = \"responses\"\r\n\
+             [model_providers.old]\n  wire_api = \"responses\"\nname = \"chat\"\n"
+        );
+    }
+
+    #[test]
+    fn codex_wire_api_responses_is_left_untouched() {
+        assert!(migrate_codex_wire_api("wire_api = \"responses\"\n").is_none());
+        assert!(migrate_codex_wire_api("").is_none());
     }
 }
 
@@ -658,5 +729,25 @@ mod official_baseline_tests {
         // 无 models_base_url = 无意义配置，不应导入。
         fs::write(&path, b"[models]\ndefault = \"grok-4.5\"\n").unwrap();
         assert!(import_grok().is_none());
+    }
+
+    #[test]
+    fn codex_live_chat_is_repaired_with_backup() {
+        let _home = TestHome::new();
+        let path = config::get_codex_config_path();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "[model_providers.custom]\nwire_api = \"chat\"\n").unwrap();
+
+        assert!(repair_codex_live_wire_api(true).unwrap());
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "[model_providers.custom]\nwire_api = \"responses\"\n"
+        );
+        let backups = fs::read_dir(config::get_app_config_dir().join("backups"))
+            .unwrap()
+            .count();
+        assert_eq!(backups, 1);
+        // 已修正后再跑不应重复改写。
+        assert!(!repair_codex_live_wire_api(true).unwrap());
     }
 }
