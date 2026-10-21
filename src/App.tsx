@@ -4,6 +4,7 @@ import {
   getConfig,
   switchProvider,
   deleteProvider,
+  deleteProviders,
   saveProvider,
   reorderProviders,
   saveSettings,
@@ -15,11 +16,15 @@ import {
   restoreOfficialBaseline,
   proxyStatus,
   setAppRouting,
+  setProviderProxy,
+  checkNetworkProxy,
   type ActiveDeleteMode,
   type OriginalConfigStatus,
+  type ProviderProxySetting,
   type ProxyStatus,
 } from "./api";
 import ProviderModal from "./ProviderModal";
+import { displayProxy, effectiveProxy, globalProxyOf, ProviderProxyModal, supportsNetworkProxy } from "./NetworkProxy";
 import SettingsModal from "./SettingsModal";
 import ImportExportModal from "./ImportExportModal";
 import CcswitchImportModal from "./CcswitchImportModal";
@@ -43,6 +48,7 @@ import {
   CopyIcon,
   DownloadIcon,
   EditIcon,
+  GlobeIcon,
   InboxIcon,
   MessageIcon,
   PlusIcon,
@@ -218,12 +224,18 @@ export default function App() {
   const [lat, setLat] = useState<Record<string, Lat>>({});
   const [modal, setModal] = useState<null | { edit?: Provider }>(null);
   const [streamModal, setStreamModal] = useState<null | { app: AppType; provider: Provider }>(null);
+  const [proxyModal, setProxyModal] = useState<null | { app: AppType; provider: Provider }>(null);
   const [streamResults, setStreamResults] = useState<Record<string, StreamTestSummary>>({});
   const [page, setPage] = useState<"providers" | "settings">("providers");
   const [io, setIo] = useState<null | "import" | "export">(null);
+  // 导入配置后递增，通知设置页重新同步设置副本
+  const [settingsEpoch, setSettingsEpoch] = useState(0);
   const [ccOpen, setCcOpen] = useState(false);
   const [dragId, setDragId] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
+  // 批量管理：勾选模式（官方卡片与正在使用的供应商不可勾选）
+  const [selecting, setSelecting] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [originalStatus, setOriginalStatus] = useState<OriginalConfigStatus | null>(null);
   const [updateInfo, setUpdateInfo] = useState<Update | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
@@ -497,6 +509,29 @@ export default function App() {
     () => (data ? data.order.map((id) => data.providers[id]).filter(Boolean) : []),
     [data],
   );
+  const selectableIds = useMemo(
+    () => ordered.filter((p) => !isOfficialProvider(p) && p.id !== data?.current).map((p) => p.id),
+    [ordered, data?.current],
+  );
+  // 只认仍然可勾选的项（删除、切换或托盘改动后自动剔除失效勾选）
+  const selectedIds = selectableIds.filter((id) => selected.has(id));
+
+  // 切换客户端 / 页面时退出批量管理
+  useEffect(() => {
+    setSelecting(false);
+    setSelected(new Set());
+  }, [tab, page]);
+
+  // Esc 退出批量管理（弹窗打开时交给弹窗自己处理）
+  useEffect(() => {
+    if (!selecting) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== "Escape" || confirm || modal || streamModal || proxyModal) return;
+      exitSelecting();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selecting, confirm, modal, streamModal, proxyModal]);
 
   async function run(p: Promise<Root>, okMsg?: string) {
     try {
@@ -504,6 +539,41 @@ export default function App() {
       if (okMsg) pushToast("success", okMsg);
     } catch (e) {
       pushToast("error", String(e));
+    }
+  }
+
+  const globalProxy = globalProxyOf(root?.settings);
+  const proxyOf = (app: AppType, p: Provider) => effectiveProxy(app, root?.settings, p);
+
+  async function onSwitch(p: Provider) {
+    const app = tab;
+    let next: Root;
+    try {
+      next = await switchProvider(app, p.id);
+    } catch (e) {
+      pushToast("error", String(e));
+      return;
+    }
+    setRoot(next);
+    pushToast("success", `已切换到 ${p.name}`);
+    // 非阻断提醒：切到使用网络代理的供应商时，检测代理端口是否可连
+    const proxyUrl = effectiveProxy(app, next.settings, next.apps[app]?.providers[p.id] ?? p);
+    if (proxyUrl) {
+      checkNetworkProxy(proxyUrl).catch(() =>
+        pushToast("error", `网络代理 ${displayProxy(proxyUrl)} 无法连接，请确认代理软件已启动`),
+      );
+    }
+  }
+
+  async function onSaveProviderProxy(app: AppType, p: Provider, setting: ProviderProxySetting) {
+    try {
+      setRoot(await setProviderProxy(app, p.id, setting));
+      setProxyModal(null);
+      pushToast("success", "网络代理已保存");
+      return true;
+    } catch (e) {
+      pushToast("error", String(e));
+      return false;
     }
   }
 
@@ -567,6 +637,56 @@ export default function App() {
       confirmText: "删除",
       danger: true,
       onConfirm: () => remove(),
+    });
+  }
+
+  function exitSelecting() {
+    setSelecting(false);
+    setSelected(new Set());
+  }
+
+  function toggleSelected(id: string) {
+    if (!selectableIds.includes(id)) return;
+    setSelected((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleSelectAll() {
+    setSelected(selectedIds.length === selectableIds.length ? new Set() : new Set(selectableIds));
+  }
+
+  function onBatchDelete() {
+    if (!data || selectedIds.length === 0) return;
+    const ids = [...selectedIds];
+    const names = ids.map((id) => data.providers[id]?.name ?? id);
+    const shown = names.slice(0, 8).map((n) => `「${n}」`).join("、");
+    const app = tab;
+    setConfirm({
+      title: "批量删除供应商",
+      message: `删除以下 ${ids.length} 个供应商？${shown}${names.length > 8 ? ` 等 ${names.length} 个` : ""}。此操作不可撤销，不会改动电脑上当前生效的配置。`,
+      confirmText: `删除 ${ids.length} 个`,
+      danger: true,
+      onConfirm: () => {
+        setConfirm(null);
+        deleteProviders(app, ids)
+          .then((r) => {
+            setRoot(r);
+            const drop = <T,>(m: Record<string, T>) => {
+              const next = { ...m };
+              for (const id of ids) delete next[`${app}:${id}`];
+              return next;
+            };
+            setLat(drop);
+            setStreamResults(drop);
+            exitSelecting();
+            pushToast("success", `已删除 ${ids.length} 个供应商`);
+          })
+          .catch((e) => pushToast("error", String(e)));
+      },
     });
   }
 
@@ -683,7 +803,7 @@ export default function App() {
       }
       setLat((m) => ({ ...m, [key]: { loading: true } }));
       try {
-        const ms = await speedtest(url);
+        const ms = await speedtest(url, proxyOf(tab, p));
         setLat((m) => ({ ...m, [key]: { ms } }));
       } catch {
         setLat((m) => ({ ...m, [key]: { err: true } }));
@@ -700,7 +820,7 @@ export default function App() {
     }
     setLat((m) => ({ ...m, [key]: { loading: true } }));
     try {
-      const ms = await speedtest(url);
+      const ms = await speedtest(url, proxyOf(tab, p));
       setLat((m) => ({ ...m, [key]: { ms } }));
     } catch {
       setLat((m) => ({ ...m, [key]: { err: true } }));
@@ -934,17 +1054,52 @@ export default function App() {
             onOpenExport={() => setIo("export")}
             onOpenCcswitch={() => setCcOpen(true)}
             onRepaired={(r) => setRoot(r)}
+            settingsEpoch={settingsEpoch}
           />
         ) : (
         <>
-        <div className="list-header">
-          <span className="lh-title">供应商 <b>{ordered.length}</b></span>
-          <div className="lh-actions">
-            <button className="btn" onClick={speedtestAll}><BoltIcon />全部测速</button>
-            <button className="btn primary" onClick={() => setModal({})}><PlusIcon />添加供应商</button>
-          </div>
+        <div className={"list-header" + (selecting ? " selecting" : "")}>
+          {selecting ? (
+            <>
+              <label className="lh-title lh-check">
+                <input
+                  type="checkbox"
+                  checked={selectableIds.length > 0 && selectedIds.length === selectableIds.length}
+                  ref={(el) => {
+                    if (el) el.indeterminate = selectedIds.length > 0 && selectedIds.length < selectableIds.length;
+                  }}
+                  disabled={selectableIds.length === 0}
+                  onChange={toggleSelectAll}
+                />
+                已选 <b>{selectedIds.length}</b>
+                <span className="lh-sub">/ 可选 {selectableIds.length}</span>
+              </label>
+              <div className="lh-actions">
+                <button className="btn danger" disabled={selectedIds.length === 0} onClick={onBatchDelete}>
+                  <TrashIcon />删除所选
+                </button>
+                <button className="btn" onClick={exitSelecting}>完成</button>
+              </div>
+            </>
+          ) : (
+            <>
+              <span className="lh-title">供应商 <b>{ordered.length}</b></span>
+              <div className="lh-actions">
+                <button
+                  className="btn"
+                  onClick={() => setSelecting(true)}
+                  disabled={selectableIds.length === 0}
+                  title={selectableIds.length === 0 ? "没有可批量删除的供应商（官方账号与正在使用的供应商除外）" : "勾选多个供应商批量删除"}
+                >
+                  <CheckIcon />批量管理
+                </button>
+                <button className="btn" onClick={speedtestAll}><BoltIcon />全部测速</button>
+                <button className="btn primary" onClick={() => setModal({})}><PlusIcon />添加供应商</button>
+              </div>
+            </>
+          )}
         </div>
-        <div className={"list" + (dragId ? " sorting" : "")}>
+        <div className={"list" + (dragId ? " sorting" : "") + (selecting ? " selecting" : "")}>
           {ordered.length === 0 ? (
             <div className="empty">
               <div className="empty-ico"><InboxIcon /></div>
@@ -965,6 +1120,9 @@ export default function App() {
                 const l = lat[`${tab}:${p.id}`];
                 const kind = healthKind(tab, p);
                 const streamResult = streamResults[`${tab}:${p.id}`];
+                const selectable = selectableIds.includes(p.id);
+                const checked = selectable && selected.has(p.id);
+                const pProxy = proxyOf(tab, p);
                 return (
                   <div
                     key={p.id}
@@ -972,6 +1130,8 @@ export default function App() {
                     className={
                       "prow" +
                       (active ? " active" : "") +
+                      (selecting ? (selectable ? " selectable" : " unselectable") : "") +
+                      (checked ? " checked" : "") +
                       (dragId === p.id ? " dragging" : "") +
                       (dropTarget?.id === p.id && dragId !== p.id
                         ? dropTarget.after
@@ -979,23 +1139,47 @@ export default function App() {
                           : " drop-before"
                         : "")
                     }
+                    onClick={selecting ? () => toggleSelected(p.id) : undefined}
+                    title={selecting && !selectable
+                      ? official ? "官方账号是系统卡片，不能删除" : "正在使用的供应商请单独删除"
+                      : undefined}
                   >
-                    <span
-                      className="p-ava"
-                      title="按住拖拽排序"
-                      onPointerDown={(e) => onSortPointerDown(e, p.id)}
-                      onPointerMove={onSortPointerMove}
-                      onPointerUp={onSortPointerUp}
-                      onPointerCancel={onSortPointerCancel}
-                    >
-                      {initials(p.name)}
-                    </span>
+                    {selecting ? (
+                      <input
+                        type="checkbox"
+                        className="p-check"
+                        checked={checked}
+                        disabled={!selectable}
+                        onClick={(e) => e.stopPropagation()}
+                        onChange={() => toggleSelected(p.id)}
+                        aria-label={`选择 ${p.name}`}
+                      />
+                    ) : (
+                      <span
+                        className="p-ava"
+                        title="按住拖拽排序"
+                        onPointerDown={(e) => onSortPointerDown(e, p.id)}
+                        onPointerMove={onSortPointerMove}
+                        onPointerUp={onSortPointerUp}
+                        onPointerCancel={onSortPointerCancel}
+                      >
+                        {initials(p.name)}
+                      </span>
+                    )}
 
                     <div className="pinfo">
                       <div className="prow1">
                         <span className="pname">{p.name}</span>
                         {official && <span className="badge">官方账号</span>}
                         {active && <span className="badge green"><span className="d" />正在生效</span>}
+                        {pProxy && (
+                          <span
+                            className="badge proxy"
+                            title={`网络代理：${displayProxy(pProxy)}${p.meta?.proxy ? "（单独设置）" : "（全局默认）"}`}
+                          >
+                            代理
+                          </span>
+                        )}
                       </div>
                       <div className="prow2">
                         {official ? (
@@ -1029,12 +1213,26 @@ export default function App() {
                     </div>
 
                     <div className="pactions">
-                      {active ? (
+                      {selecting ? (
+                        !selectable && <span className="sel-hint">{official ? "系统卡片" : "使用中 · 请单独删除"}</span>
+                      ) : active ? (
                         <span className="inuse"><CheckIcon />已生效</span>
                       ) : (
-                        <button className="row-btn" onClick={() => run(switchProvider(tab, p.id), `已切换到 ${p.name}`)}>切换</button>
+                        <button className="row-btn" onClick={() => onSwitch(p)}>切换</button>
                       )}
-                      {!official && (
+                      {official && !selecting && supportsNetworkProxy(tab) && (
+                        <div className="row-tools">
+                          <button
+                            className={"mini-ic" + (p.meta?.proxy ? " proxy-set" : "")}
+                            onClick={() => setProxyModal({ app: tab, provider: p })}
+                            title="网络代理"
+                            aria-label={`网络代理 ${p.name}`}
+                          >
+                            <GlobeIcon />
+                          </button>
+                        </div>
+                      )}
+                      {!official && !selecting && (
                         <>
                           <div className="row-tools">
                             <button
@@ -1123,6 +1321,7 @@ export default function App() {
         <StreamTestModal
           app={streamModal.app}
           provider={streamModal.provider}
+          proxy={proxyOf(streamModal.app, streamModal.provider)}
           onClose={() => setStreamModal(null)}
           onResult={(result) => {
             const key = `${streamModal.app}:${streamModal.provider.id}`;
@@ -1135,17 +1334,33 @@ export default function App() {
           app={tab}
           initial={modal.edit}
           existingIds={existingIds}
+          globalProxy={globalProxy}
           onClose={() => setModal(null)}
           onSave={onSaveProvider}
+        />
+      )}
+      {proxyModal && (
+        <ProviderProxyModal
+          app={proxyModal.app}
+          provider={proxyModal.provider}
+          globalProxy={globalProxy}
+          onClose={() => setProxyModal(null)}
+          onSave={(setting) => onSaveProviderProxy(proxyModal.app, proxyModal.provider, setting)}
         />
       )}
       {io && (
         <ImportExportModal
           mode={io}
           onClose={() => setIo(null)}
-          onImported={(r) => {
+          onImported={({ root: r, kept, applied, warning }) => {
             setRoot(r);
-            pushToast("success", "已导入配置");
+            setSettingsEpoch((n) => n + 1);
+            const notes = [
+              kept.length ? `保留本机正在使用的：${kept.join("、")}` : "",
+              applied.length ? `已改用导入版本并写入客户端配置：${applied.join("、")}` : "",
+            ].filter(Boolean);
+            pushToast("success", ["已导入配置", ...notes].join(" · "));
+            if (warning) pushToast("error", warning);
           }}
         />
       )}

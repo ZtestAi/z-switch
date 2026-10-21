@@ -51,6 +51,11 @@ pub fn get_codex_config_path() -> PathBuf {
     get_home_dir().join(".codex").join("config.toml")
 }
 
+/// Codex 启动时加载的环境变量文件：~/.codex/.env（z-switch 只管理其中的网络代理区块）
+pub fn get_codex_env_path() -> PathBuf {
+    get_home_dir().join(".codex").join(".env")
+}
+
 /// Grok config：~/.grok/config.toml（单文件 TOML，直连写入）
 pub fn get_grok_config_path() -> PathBuf {
     get_home_dir().join(".grok").join("config.toml")

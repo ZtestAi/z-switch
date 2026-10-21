@@ -14,6 +14,8 @@ export interface StreamTestSummary {
 interface Props {
   app: AppType;
   provider: Provider;
+  /** 该供应商的生效网络代理：测试请求与 CLI 走同一条线路 */
+  proxy?: string | null;
   onClose: () => void;
   onResult: (result: StreamTestSummary) => void;
 }
@@ -68,7 +70,7 @@ function configOf(app: AppType, provider: Provider) {
   };
 }
 
-export default function StreamTestModal({ app, provider, onClose, onResult }: Props) {
+export default function StreamTestModal({ app, provider, proxy, onClose, onResult }: Props) {
   const config = configOf(app, provider);
   // Grok CLI 暂无可靠的请求特征，只为 Claude Code / Codex 提供模拟。
   const canSimulateCli = app === "claude" || app === "codex";
@@ -103,6 +105,7 @@ export default function StreamTestModal({ app, provider, onClose, onResult }: Pr
         config.baseUrl,
         config.apiKey,
         (provider.meta as any)?.modelsUrl,
+        proxy,
       );
       if (!mounted.current || request !== modelRequest.current) return;
       setModels(available);
@@ -133,6 +136,7 @@ export default function StreamTestModal({ app, provider, onClose, onResult }: Pr
           wireApi: config.wireApi,
           apiKeyField: config.apiKeyField,
           simulateCli,
+          proxy,
         },
         (event) => {
           if (!mounted.current || event.kind !== "delta" || !event.text) return;

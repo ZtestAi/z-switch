@@ -177,6 +177,8 @@ pub fn restore_app(app: &str) -> Result<(), String> {
             // 原始配置可能来自 Codex 移除 chat 协议之前，恢复后顺带修正，否则 Codex 无法启动。
             // 恢复前已整体备份过，这里不再重复备份。
             live::repair_codex_live_wire_api(false)?;
+            // 原始配置不含 z-switch 注入的网络代理：移除 ~/.codex/.env 托管区块，保留用户自己的行。
+            crate::netproxy::write_codex_env(None, false)?;
             Ok(())
         }
         "grok" => apply_file(

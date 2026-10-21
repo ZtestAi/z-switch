@@ -79,7 +79,8 @@ One-click desktop provider switcher for Claude Code, Codex &amp; Grok — atomic
 
 | 分类 | 能力 |
 | --- | --- |
-| **供应商管理** | Claude Code / Codex / Grok 分区管理、一键切换；自定义供应商的添加、复制、编辑、删除；表单与 JSON 两种编辑方式 |
+| **供应商管理** | Claude Code / Codex / Grok 分区管理、一键切换；自定义供应商的添加、复制、编辑、删除、**批量删除**；表单与 JSON 两种编辑方式 |
+| **网络代理** | 为 Claude Code / Codex 配置 HTTP 代理：全局默认 + 供应商单独设置（单独设置优先，官方账号卡片同样支持）；Claude 注入 `env`，Codex 写 `~/.codex/.env` 托管区块 |
 | **开箱即用** | 内置 Claude / OpenAI 官方账号卡片，可与任意 API 中转站来回切换；首次启动自动保留并导入已有的 `~/.claude` / `~/.codex` / `~/.grok` 配置 |
 | **多档模型** | Claude 支持主模型与 Haiku / Sonnet / Opus / Fable 四档独立配置，已适配 Claude 5.x（原生 1M 上下文），旧模型可勾选 `[1M]` 标记；Codex 统一使用 `responses` 协议（旧 `chat` 配置自动迁移），支持 low ~ ultra 推理强度；Grok 单模型 + `context_window`（默认 500000） |
 | **供应商体检** | Base URL 智能推断、连通性测试、模型列表拉取、**HTTP 层测速**，以及发送最小流式 `Hi` 的**真实调用测试**（显示首字耗时与总耗时；可选**模拟 Claude Code / Codex CLI 请求**，适配只放行官方客户端的中转站） |
@@ -204,6 +205,7 @@ One-click desktop provider switcher for Claude Code, Codex &amp; Grok — atomic
 | `~/.claude.json` | Claude Code 根配置（`hasCompletedOnboarding`，开启「跳过初次确认」时写入） |
 | `%LOCALAPPDATA%\Claude`、`Claude-3p`（mac 为 `~/Library/Application Support/…`） | Claude 桌面版配置（开启「桌面版随切换」时写 3p 网关 profile） |
 | `~/.codex/auth.json`、`~/.codex/config.toml` | Codex 客户端配置（直连模式写入） |
+| `~/.codex/.env` | Codex 环境变量（设置网络代理时写入 z-switch 托管区块，保留用户自己的行） |
 | `~/.grok/config.toml` | Grok 客户端配置（直连模式整文件写入，单文件 TOML） |
 | `~/.z-switch/original/` | 首次运行保存的**原始配置快照**，可随时恢复 |
 | `~/.z-switch/backups/` | 每次写入前的时间戳备份 |

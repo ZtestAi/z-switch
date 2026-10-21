@@ -50,7 +50,7 @@ fn read_obj(path: &Path) -> Result<Map<String, Value>, String> {
 }
 
 /// 写前备份：把现有文件复制到 ~/.z-switch/backups/{tag}-{纳秒}.bak
-fn backup_file(path: &Path, tag: &str) {
+pub(crate) fn backup_file(path: &Path, tag: &str) {
     if !path.exists() {
         return;
     }
@@ -73,6 +73,7 @@ pub fn backup_current_app(app: &str) {
         "codex" => {
             backup_file(&config::get_codex_auth_path(), "codex-auth");
             backup_file(&config::get_codex_config_path(), "codex-config");
+            backup_file(&config::get_codex_env_path(), "codex-env");
         }
         "grok" => backup_file(&config::get_grok_config_path(), "grok-config"),
         _ => {}
@@ -111,7 +112,13 @@ fn write_claude_live(env: &Value, backup: bool) -> Result<(), String> {
 /// - 写前先备份现有文件（含非法 JSON / 损坏 toml）。
 /// - Claude：能解析则只清掉中转 env、保留其它顶层字段；不能解析则硬重置为 `{"env":{}}`。
 /// - Codex：整份覆盖写官方 auth 快照 + 无中转的 config（本来就不依赖解析旧文件）。
-pub fn write_official_baseline(app: &str, backup: bool) -> Result<(), String> {
+/// - 网络代理：先清掉 `managed` 中 z-switch 注入过的旧值，再按 `proxy` 注入。
+pub fn write_official_baseline(
+    app: &str,
+    backup: bool,
+    proxy: Option<&str>,
+    managed: &[String],
+) -> Result<(), String> {
     match app {
         "claude" => {
             let path = config::get_claude_settings_path();
@@ -124,19 +131,24 @@ pub fn write_official_baseline(app: &str, backup: bool) -> Result<(), String> {
                         .get("env")
                         .cloned()
                         .unwrap_or_else(|| Value::Object(Map::new()));
-                    settings.insert("env".into(), sanitize_claude_official_env(&env));
+                    let mut env = sanitize_claude_official_env(&env);
+                    crate::netproxy::strip_claude_env(&mut env, managed);
+                    crate::netproxy::inject_claude_env(&mut env, proxy);
+                    settings.insert("env".into(), env);
                     config::write_json_file(&path, &Value::Object(settings))
                 }
                 Err(_) => {
                     // 损坏文件：硬重置为最小合法官方配置（坏文件已备份）。
-                    config::write_json_file(&path, &serde_json::json!({ "env": {} }))
+                    let mut env = Value::Object(Map::new());
+                    crate::netproxy::inject_claude_env(&mut env, proxy);
+                    config::write_json_file(&path, &serde_json::json!({ "env": env }))
                 }
             }
         }
         "codex" => {
             let auth = crate::official::codex_auth_for_restore()?;
             // 空 config = 官方默认（无 model_provider / base_url）。
-            write_codex_live(&auth, "", backup)
+            write_codex_live_with_env(&auth, "", backup, proxy)
         }
         other => Err(format!("未知应用: {other}")),
     }
@@ -178,6 +190,21 @@ fn write_codex_live(auth: &Value, config_text: &str, backup: bool) -> Result<(),
             }
         }
         return Err(format!("写入 config.toml 失败，已回滚 auth.json：{e}"));
+    }
+    Ok(())
+}
+
+/// 先按网络代理更新 `~/.codex/.env` 托管区块，再双文件写 auth/config；后者失败则回滚 .env。
+fn write_codex_live_with_env(
+    auth: &Value,
+    config_text: &str,
+    backup: bool,
+    proxy: Option<&str>,
+) -> Result<(), String> {
+    let undo = crate::netproxy::write_codex_env(proxy, backup)?;
+    if let Err(e) = write_codex_live(auth, config_text, backup) {
+        crate::netproxy::undo_codex_env(undo);
+        return Err(e);
     }
     Ok(())
 }
@@ -279,8 +306,8 @@ pub fn repair_codex_live_wire_api(backup: bool) -> Result<bool, String> {
 }
 
 /// 官方卡片首次出现时，从 live 中提取非敏感、非中转的公共配置。
-/// 只填充空白种子，避免每次启动时被当前中转配置覆盖。
-pub fn hydrate_official_provider(app: &str, provider: &mut Provider) -> bool {
+/// 只填充空白种子，避免每次启动时被当前中转配置覆盖。`managed` 为 z-switch 注入过的网络代理地址，不收进卡片。
+pub fn hydrate_official_provider(app: &str, provider: &mut Provider, managed: &[String]) -> bool {
     if !store::is_official_provider(provider) {
         return false;
     }
@@ -296,7 +323,8 @@ pub fn hydrate_official_provider(app: &str, provider: &mut Provider) -> bool {
             let Some(live) = read_claude_live_env() else {
                 return false;
             };
-            let sanitized = sanitize_claude_official_env(&live);
+            let mut sanitized = sanitize_claude_official_env(&live);
+            crate::netproxy::strip_claude_env(&mut sanitized, managed);
             if sanitized.as_object().is_none_or(|env| env.is_empty()) {
                 return false;
             }
@@ -343,8 +371,14 @@ fn write_grok_live(config_text: &str, backup: bool) -> Result<(), String> {
 
 // ---------- 对外统一入口 ----------
 
-/// 把目标 provider 写进 live 配置。
-pub fn write_live(app: &str, provider: &Provider, backup: bool) -> Result<(), String> {
+/// 把目标 provider 写进 live 配置。`proxy` 为该供应商生效的网络代理
+/// （本地路由模式下客户端只连 127.0.0.1，调用方传 None）。
+pub fn write_live(
+    app: &str,
+    provider: &Provider,
+    backup: bool,
+    proxy: Option<&str>,
+) -> Result<(), String> {
     let official = store::is_official_provider(provider);
     match app {
         "claude" => {
@@ -356,6 +390,7 @@ pub fn write_live(app: &str, provider: &Provider, backup: bool) -> Result<(), St
             if official {
                 env = sanitize_claude_official_env(&env);
             }
+            crate::netproxy::inject_claude_env(&mut env, proxy);
             write_claude_live(&env, backup)
         }
         "codex" => {
@@ -380,7 +415,7 @@ pub fn write_live(app: &str, provider: &Provider, backup: bool) -> Result<(), St
             if let Some(migrated) = migrate_codex_wire_api(&cfg) {
                 cfg = migrated;
             }
-            write_codex_live(&auth, &cfg, backup)
+            write_codex_live_with_env(&auth, &cfg, backup, proxy)
         }
         "grok" => {
             let cfg = provider
@@ -395,8 +430,9 @@ pub fn write_live(app: &str, provider: &Provider, backup: bool) -> Result<(), St
 }
 
 /// 切换前 backfill：把当前 live 配置回写进旧 provider 的 settings_config，
-/// 避免用户在配置文件里的手改在切换时丢失。
-pub fn backfill(app: &str, provider: &mut Provider) {
+/// 避免用户在配置文件里的手改在切换时丢失。`managed` 为 z-switch 注入过的
+/// 网络代理地址，回写时剔除（代理由 meta.proxy / 全局设置管理，不进 env）。
+pub fn backfill(app: &str, provider: &mut Provider, managed: &[String]) {
     let official = store::is_official_provider(provider);
     let obj = match provider.settings_config.as_object_mut() {
         Some(o) => o,
@@ -405,14 +441,13 @@ pub fn backfill(app: &str, provider: &mut Provider) {
     match app {
         "claude" => {
             if let Some(env) = read_claude_live_env() {
-                obj.insert(
-                    "env".into(),
-                    if official {
-                        sanitize_claude_official_env(&env)
-                    } else {
-                        env
-                    },
-                );
+                let mut env = if official {
+                    sanitize_claude_official_env(&env)
+                } else {
+                    env
+                };
+                crate::netproxy::strip_claude_env(&mut env, managed);
+                obj.insert("env".into(), env);
             }
         }
         "codex" => {
@@ -449,6 +484,39 @@ pub fn backfill(app: &str, provider: &mut Provider) {
     }
 }
 
+/// 只改写 live 中的网络代理（不重写供应商其它配置）：先清掉 `managed` 中的旧值，
+/// 再注入 `proxy`。用于修改全局默认 / 当前卡片代理设置后就地生效；内容不变则不写。
+pub fn apply_proxy_live(
+    app: &str,
+    managed: &[String],
+    proxy: Option<&str>,
+    backup: bool,
+) -> Result<(), String> {
+    match app {
+        "claude" => {
+            let path = config::get_claude_settings_path();
+            let mut settings = read_obj(&path)?;
+            let original = settings
+                .get("env")
+                .cloned()
+                .unwrap_or_else(|| Value::Object(Map::new()));
+            let mut env = original.clone();
+            crate::netproxy::strip_claude_env(&mut env, managed);
+            crate::netproxy::inject_claude_env(&mut env, proxy);
+            if env == original {
+                return Ok(());
+            }
+            if backup {
+                backup_file(&path, "claude-settings");
+            }
+            settings.insert("env".into(), env);
+            config::write_json_file(&path, &Value::Object(settings))
+        }
+        "codex" => crate::netproxy::write_codex_env(proxy, backup).map(|_| ()),
+        _ => Ok(()),
+    }
+}
+
 // ---------- 首次导入：从现有 live 配置反向生成 Provider ----------
 
 /// 从 config.toml 文本里取 `base_url = "..."` 的主机名，做个可读的名字回退。
@@ -463,9 +531,10 @@ fn host_of(url: &str) -> Option<String> {
 }
 
 /// 读取当前 `~/.claude/settings.json` 的 env，若存在有效 base_url 则生成一个 Provider。
-/// 返回 None 表示无可导入内容（文件缺失/无 env/无 base_url）。
-pub fn import_claude() -> Option<Provider> {
-    let env = read_claude_live_env()?;
+/// 返回 None 表示无可导入内容（文件缺失/无 env/无 base_url）。`managed` 同 `backfill`，不收进卡片。
+pub fn import_claude(managed: &[String]) -> Option<Provider> {
+    let mut env = read_claude_live_env()?;
+    crate::netproxy::strip_claude_env(&mut env, managed);
     let env_obj = env.as_object()?;
     let base = env_obj.get("ANTHROPIC_BASE_URL").and_then(|v| v.as_str());
     // 没有 base_url 视为无意义（可能是官方直连或空配置），不导入
@@ -667,7 +736,7 @@ mod official_baseline_tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, b"{not-json").unwrap();
 
-        write_official_baseline("claude", true).unwrap();
+        write_official_baseline("claude", true, None, &[]).unwrap();
 
         let restored: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert!(restored.get("env").and_then(Value::as_object).is_some());
@@ -685,7 +754,7 @@ mod official_baseline_tests {
         )
         .unwrap();
 
-        write_official_baseline("claude", false).unwrap();
+        write_official_baseline("claude", false, None, &[]).unwrap();
 
         let restored: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(restored["keep"], true);
@@ -708,7 +777,7 @@ mod official_baseline_tests {
         };
 
         // 写 live → ~/.grok/config.toml 内容与 settings_config.config 一致。
-        write_live("grok", &provider, false).unwrap();
+        write_live("grok", &provider, false, None).unwrap();
         let on_disk = fs::read_to_string(config::get_grok_config_path()).unwrap();
         assert_eq!(on_disk, toml);
 
@@ -749,5 +818,82 @@ mod official_baseline_tests {
         assert_eq!(backups, 1);
         // 已修正后再跑不应重复改写。
         assert!(!repair_codex_live_wire_api(true).unwrap());
+    }
+
+    const PROXY: &str = "http://127.0.0.1:7890";
+
+    fn relay(settings_config: Value) -> Provider {
+        Provider {
+            id: "relay".into(),
+            name: "Relay".into(),
+            category: Some("custom".into()),
+            settings_config,
+            meta: serde_json::json!({}),
+            failover: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn claude_proxy_is_injected_and_not_backfilled_into_provider() {
+        let _home = TestHome::new();
+        let mut provider = relay(serde_json::json!({
+            "env": { "ANTHROPIC_BASE_URL": "https://relay", "ANTHROPIC_AUTH_TOKEN": "sk" }
+        }));
+        write_live("claude", &provider, false, Some(PROXY)).unwrap();
+        let path = config::get_claude_settings_path();
+        let live: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(live["env"]["HTTPS_PROXY"], PROXY);
+        assert_eq!(live["env"]["http_proxy"], PROXY);
+
+        backfill("claude", &mut provider, &[PROXY.to_string()]);
+        let env = &provider.settings_config["env"];
+        assert!(env.get("HTTPS_PROXY").is_none() && env.get("http_proxy").is_none());
+        assert_eq!(env["ANTHROPIC_BASE_URL"], "https://relay");
+
+        // 就地改代理：换新值，旧值被清掉，其它字段不动；再改为不使用则全部移除。
+        let other = "http://10.0.0.2:3128";
+        apply_proxy_live("claude", &[PROXY.to_string()], Some(other), false).unwrap();
+        let live: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(live["env"]["HTTP_PROXY"], other);
+        assert_eq!(live["env"]["ANTHROPIC_AUTH_TOKEN"], "sk");
+        apply_proxy_live("claude", &[other.to_string()], None, false).unwrap();
+        let live: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(live["env"].get("HTTP_PROXY").is_none());
+    }
+
+    #[test]
+    fn official_baseline_replaces_previous_injected_proxy() {
+        let _home = TestHome::new();
+        let path = config::get_claude_settings_path();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            format!(r#"{{"env":{{"HTTPS_PROXY":"{PROXY}","http_proxy":"http://mine:1"}}}}"#),
+        )
+        .unwrap();
+        write_official_baseline("claude", false, None, &[PROXY.to_string()]).unwrap();
+        let live: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(live["env"].get("HTTPS_PROXY").is_none());
+        assert_eq!(live["env"]["http_proxy"], "http://mine:1");
+    }
+
+    #[test]
+    fn codex_proxy_goes_to_env_block_and_keeps_user_lines() {
+        let _home = TestHome::new();
+        let env_path = config::get_codex_env_path();
+        fs::create_dir_all(env_path.parent().unwrap()).unwrap();
+        fs::write(&env_path, "OPENAI_ORG=me\n").unwrap();
+        let provider = relay(serde_json::json!({
+            "auth": { "OPENAI_API_KEY": "sk" },
+            "config": "model_provider = \"relay\"\n"
+        }));
+
+        write_live("codex", &provider, false, Some(PROXY)).unwrap();
+        let text = fs::read_to_string(&env_path).unwrap();
+        assert!(text.starts_with("OPENAI_ORG=me\n"));
+        assert!(text.contains(&format!("HTTPS_PROXY='{PROXY}'")));
+
+        write_live("codex", &provider, false, None).unwrap();
+        assert_eq!(fs::read_to_string(&env_path).unwrap(), "OPENAI_ORG=me\n");
     }
 }

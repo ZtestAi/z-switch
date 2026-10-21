@@ -12,14 +12,47 @@ export type ActiveDeleteMode = "keep" | "restore";
 export const deleteProvider = (app: AppType, id: string, activeMode?: ActiveDeleteMode) =>
   invoke<Root>("delete_provider", { app, id, activeMode: activeMode ?? null });
 
+/** 批量删除（不含官方卡片与当前正在使用的供应商；任一不合法则整批拒绝） */
+export const deleteProviders = (app: AppType, ids: string[]) =>
+  invoke<Root>("delete_providers", { app, ids });
+
 export const switchProvider = (app: AppType, id: string) =>
   invoke<Root>("switch_provider", { app, id });
 
 export const reorderProviders = (app: AppType, order: string[]) =>
   invoke<Root>("reorder_providers", { app, order });
 
-export const importConfig = (rootIn: Root) =>
-  invoke<Root>("import_config", { rootIn });
+/** 导入结果：kept = 保留本机版本的中转站；applied = 改用导入版本并已写入客户端配置的中转站；warning = 非致命问题（已导入） */
+export interface ImportOutcome {
+  root: Root;
+  kept: string[];
+  applied: string[];
+  warning: string | null;
+}
+
+/** 供应商接入点概要（密钥已打码）；empty = 缺地址或缺密钥 */
+export interface EndpointSummary {
+  url: string;
+  key: string;
+  empty: boolean;
+}
+
+/** 导入冲突：本机正在使用的卡片与导入文件里同 id 的卡片内容不同 */
+export interface ImportConflict {
+  app: AppType;
+  id: string;
+  localName: string;
+  importedName: string;
+  local: EndpointSummary;
+  imported: EndpointSummary;
+}
+
+export const previewImport = (rootIn: Root) =>
+  invoke<ImportConflict[]>("preview_import", { rootIn });
+
+/** useImported：有冲突时改用导入版本的卡片（客户端 + 本机当前卡片 id；会写入客户端配置） */
+export const importConfig = (rootIn: Root, useImported: { app: AppType; id: string }[] = []) =>
+  invoke<ImportOutcome>("import_config", { rootIn, useImported });
 
 export const exportJson = () => invoke<string>("export_json");
 
@@ -40,10 +73,22 @@ export const setClaudeOnboardingSkip = (enabled: boolean) =>
 export const setClaudeDesktopEnabled = (enabled: boolean) =>
   invoke<void>("set_claude_desktop_enabled", { enabled });
 
-export const speedtest = (url: string) => invoke<number>("speedtest", { url });
+/** 网络代理设置：缺省 = 跟随全局；custom = 指定地址；off = 不注入代理 */
+export type ProviderProxySetting = { mode: "custom"; url: string } | { mode: "off" } | null;
 
-export const fetchModels = (baseUrl: string, apiKey: string, modelsUrl?: string) =>
-  invoke<string[]>("fetch_models", { baseUrl, apiKey, modelsUrl: modelsUrl ?? null });
+/** 单独设置某个供应商（含官方卡片）的网络代理；若为当前生效项会立即重写配置 */
+export const setProviderProxy = (app: AppType, id: string, proxy: ProviderProxySetting) =>
+  invoke<Root>("set_provider_proxy", { app, id, proxy });
+
+/** 检测代理端口是否可连（TCP 建连，返回毫秒） */
+export const checkNetworkProxy = (url: string) => invoke<number>("check_network_proxy", { url });
+
+/** 测试类工具的 proxy 参数：传入当前供应商的生效代理，与 CLI 实际走的线路一致 */
+export const speedtest = (url: string, proxy?: string | null) =>
+  invoke<number>("speedtest", { url, proxy: proxy ?? null });
+
+export const fetchModels = (baseUrl: string, apiKey: string, modelsUrl?: string, proxy?: string | null) =>
+  invoke<string[]>("fetch_models", { baseUrl, apiKey, modelsUrl: modelsUrl ?? null, proxy: proxy ?? null });
 
 /** 从现有 ~/.claude、~/.codex 反向导入为供应商 */
 export const importLive = () => invoke<Root>("import_live");
@@ -119,8 +164,8 @@ export interface ConnResult {
 }
 
 /** 连通性测试：地址通不通 / key 对不对 */
-export const testConnectivity = (baseUrl: string, apiKey: string) =>
-  invoke<ConnResult>("test_connectivity", { baseUrl, apiKey });
+export const testConnectivity = (baseUrl: string, apiKey: string, proxy?: string | null) =>
+  invoke<ConnResult>("test_connectivity", { baseUrl, apiKey, proxy: proxy ?? null });
 
 export interface StreamTestEvent {
   kind: "started" | "delta";
@@ -144,6 +189,8 @@ interface StreamTestInput {
   apiKeyField?: "ANTHROPIC_AUTH_TOKEN" | "ANTHROPIC_API_KEY";
   /** 按官方 CLI（Claude Code / Codex）的请求头与请求体格式发送 */
   simulateCli?: boolean;
+  /** 经此 HTTP 代理发送（供应商的生效网络代理） */
+  proxy?: string | null;
 }
 
 /** 真实发送一条 `Hi` 并实时接收供应商的流式模型回复 */
@@ -156,6 +203,7 @@ export function testStream(
     ...input,
     apiKeyField: input.apiKeyField ?? null,
     simulateCli: input.simulateCli ?? false,
+    proxy: input.proxy ?? null,
     onEvent: channel,
   });
 }

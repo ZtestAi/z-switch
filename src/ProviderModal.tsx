@@ -26,6 +26,14 @@ import {
   TrashIcon,
 } from "./Icons";
 import { ModelPicker } from "./ModelPicker";
+import {
+  draftEffectiveProxy,
+  proxyDraftOf,
+  ProxyField,
+  settingOfDraft,
+  supportsNetworkProxy,
+  type ProxyDraft,
+} from "./NetworkProxy";
 
 function slug(s: string): string {
   const t = s.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
@@ -111,11 +119,13 @@ interface Props {
   app: AppType;
   initial?: Provider;
   existingIds: string[];
+  /** 全局默认网络代理（已规范化；未设置为 null） */
+  globalProxy: string | null;
   onClose: () => void;
   onSave: (p: Provider) => void;
 }
 
-export default function ProviderModal({ app, initial, existingIds, onClose, onSave }: Props) {
+export default function ProviderModal({ app, initial, existingIds, globalProxy, onClose, onSave }: Props) {
   const editing = !!initial;
   const initEnv: Record<string, any> = (initial?.settingsConfig as any)?.env ?? {};
   const initCfg: any = (initial?.settingsConfig as any) ?? {};
@@ -176,6 +186,10 @@ export default function ProviderModal({ app, initial, existingIds, onClose, onSa
   );
 
   const [showAdv, setShowAdv] = useState(false);
+  const [proxyDraft, setProxyDraft] = useState<ProxyDraft>(() => proxyDraftOf(initial));
+  const proxySupported = supportsNetworkProxy(app);
+  // 测试工具与 CLI 走同一条线路
+  const testProxy = proxySupported ? draftEffectiveProxy(proxyDraft, globalProxy) : null;
   const [jsonMode, setJsonMode] = useState(false);
   const [jsonText, setJsonText] = useState(() => JSON.stringify(initial?.settingsConfig ?? {}, null, 2));
   const [error, setError] = useState<string | null>(null);
@@ -258,7 +272,7 @@ export default function ProviderModal({ app, initial, existingIds, onClose, onSa
     setConn("testing");
     setConnMsg(null);
     try {
-      const r = await testConnectivity(baseUrl, apiKey);
+      const r = await testConnectivity(baseUrl, apiKey, testProxy);
       if (r.status === "ok") {
         setConn("ok");
         setConnMsg(r.ms != null ? `${r.detail} · ${r.ms}ms` : r.detail);
@@ -279,7 +293,7 @@ export default function ProviderModal({ app, initial, existingIds, onClose, onSa
     if (!baseUrl.trim()) return;
     setSpeed({ loading: true });
     try {
-      const ms = await speedtest(baseUrl);
+      const ms = await speedtest(baseUrl, testProxy);
       setSpeed({ ms });
     } catch {
       setSpeed({ err: true });
@@ -291,7 +305,7 @@ export default function ProviderModal({ app, initial, existingIds, onClose, onSa
     setFetchMsg(null);
     setFetchState("idle");
     try {
-      const models = await fetchModels(baseUrl, apiKey, (initial?.meta as any)?.modelsUrl);
+      const models = await fetchModels(baseUrl, apiKey, (initial?.meta as any)?.modelsUrl, testProxy);
       setFetchedModels(models);
       setFetchState("success");
       setFetchMsg(`已载入 ${models.length} 个模型，可在模型输入框中搜索或选择。`);
@@ -359,6 +373,21 @@ export default function ProviderModal({ app, initial, existingIds, onClose, onSa
     );
   }
 
+  const proxyField = proxySupported ? (
+    <ProxyField
+      app={app}
+      value={proxyDraft}
+      onChange={(next) => {
+        setProxyDraft(next);
+        setError(null);
+        setConn("idle");
+        setConnMsg(null);
+        setSpeed({});
+      }}
+      globalProxy={globalProxy}
+    />
+  ) : null;
+
   function handleSave() {
     if (!name.trim()) {
       setError("请填写名称");
@@ -366,6 +395,12 @@ export default function ProviderModal({ app, initial, existingIds, onClose, onSa
     }
     const base = editing ? initial!.id : slug(name);
     const id = uniqueId(base, existingIds, initial?.id);
+
+    const proxyResult = proxySupported ? settingOfDraft(proxyDraft) : { setting: null };
+    if ("error" in proxyResult) {
+      setError("网络代理：" + proxyResult.error);
+      return;
+    }
 
     let provider: Provider;
     if (jsonMode) {
@@ -422,6 +457,13 @@ export default function ProviderModal({ app, initial, existingIds, onClose, onSa
         apiKey,
       );
     }
+    if (proxySupported) {
+      // 表单模式的 build*Provider 会生成新 meta：网络代理在这里统一合并（跟随全局 = 不存字段）
+      const meta: Record<string, unknown> = { ...(provider.meta ?? {}) };
+      delete meta.proxy;
+      if (proxyResult.setting) meta.proxy = proxyResult.setting;
+      provider = { ...provider, meta };
+    }
     onSave(provider);
   }
 
@@ -440,11 +482,14 @@ export default function ProviderModal({ app, initial, existingIds, onClose, onSa
           </div>
 
           {jsonMode ? (
-            <div className="field">
-              <label>settingsConfig（{app === "claude" ? "{ env }" : app === "grok" ? "{ config }" : "{ auth, config }"}）</label>
-              <textarea className="mono" value={jsonText} onChange={(e) => setJsonText(e.target.value)} style={{ minHeight: 220 }} />
-              <div className="hint">保存时原子写入，切换时保留 settings.json 中你的其它字段。</div>
-            </div>
+            <>
+              <div className="field">
+                <label>settingsConfig（{app === "claude" ? "{ env }" : app === "grok" ? "{ config }" : "{ auth, config }"}）</label>
+                <textarea className="mono" value={jsonText} onChange={(e) => setJsonText(e.target.value)} style={{ minHeight: 220 }} />
+                <div className="hint">保存时原子写入，切换时保留 settings.json 中你的其它字段。</div>
+              </div>
+              {proxyField}
+            </>
           ) : (
             <>
               <div className="field">
@@ -547,6 +592,8 @@ export default function ProviderModal({ app, initial, existingIds, onClose, onSa
                   </div>
                 </>
               )}
+
+              {proxyField}
 
               <button className="adv-toggle" onClick={() => setShowAdv((v) => !v)}>
                 {showAdv ? <ChevronDownIcon /> : <ChevronRightIcon />}高级选项

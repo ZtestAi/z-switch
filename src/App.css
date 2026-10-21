@@ -206,6 +206,18 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .p-ava { width: 34px; height: 34px; border-radius: var(--r-sm); flex: none; display: grid; place-items: center; background: var(--elevated-2); border: 1px solid var(--border); color: var(--fg-sec); font-size: var(--text-label); font-weight: 700; cursor: grab; user-select: none; touch-action: none; }
 .p-ava:active { cursor: grabbing; }
 .prow.active .p-ava { border-color: var(--accent-border); color: var(--accent-text); }
+/* 批量管理：勾选框占用头像位（34px 对齐），整行可点 */
+.p-check { flex: none; width: 34px; height: 16px; margin: 9px 0; accent-color: var(--accent); cursor: pointer; }
+.p-check:disabled { cursor: not-allowed; }
+.prow.selectable { cursor: pointer; user-select: none; }
+.prow.unselectable { cursor: not-allowed; }
+.prow.unselectable .pinfo, .prow.unselectable .phealth { opacity: .55; }
+.prow.checked, .prow.checked:hover { background: color-mix(in srgb, var(--danger) 7%, transparent); }
+.sel-hint { font-size: var(--text-sm); color: var(--fg-faint); white-space: nowrap; }
+.lh-check { display: inline-flex; align-items: center; gap: 2px; cursor: pointer; user-select: none; }
+.lh-check input { width: 16px; height: 16px; margin: 0 10px 0 2px; accent-color: var(--accent); cursor: pointer; }
+.lh-check input:disabled { cursor: not-allowed; }
+.lh-sub { margin-left: 6px; color: var(--fg-faint); font-variant-numeric: tabular-nums; }
 .pinfo { flex: 1; min-width: 0; }
 .prow1 { display: flex; align-items: center; gap: 8px; }
 .pname { font-size: var(--text-title); font-weight: 600; letter-spacing: -.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -332,6 +344,22 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .fetch-btn.ok { border-color: var(--accent-border); color: var(--success); background: var(--success-soft); }
 .fetch-btn.warn { border-color: color-mix(in srgb, var(--warning) 40%, transparent); color: var(--warning); background: var(--warning-soft); }
 .fetch-btn.fail { border-color: color-mix(in srgb, var(--danger) 40%, transparent); color: var(--danger); background: var(--danger-soft); }
+
+/* 网络代理 */
+.proxy-field-row { display: flex; align-items: center; gap: 8px; }
+.proxy-check-btn { flex: none; padding: 0 12px; }
+.proxy-field .proxy-url-input { margin-top: 8px; }
+.hint.proxy-check-ok { color: var(--success); }
+.hint.proxy-check-fail { color: var(--danger); }
+.proxy-check-ok .ui-icon, .proxy-check-fail .ui-icon { width: 13px; height: 13px; flex: none; }
+.proxy-modal-note { font-size: var(--text-sm); color: var(--fg-muted); line-height: 1.5; padding: 9px 11px; background: var(--bg-soft); border: 1px solid var(--border-light); border-radius: var(--r-sm); margin-bottom: 8px; }
+.set-row.proxy-global-row { display: block; }
+.proxy-global-row .hint { font-size: var(--text-sm); margin-top: 6px; line-height: 1.45; }
+.proxy-global-input { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.proxy-global-input input { flex: 1; min-width: 0; height: var(--control-md); padding: 0 11px; font-family: var(--mono); font-size: var(--text-label); color: var(--fg); background: var(--input-bg); border: 1px solid var(--border-strong); border-radius: var(--r-sm); }
+.proxy-global-input input:focus { outline: none; border-color: var(--accent); background: var(--elevated); box-shadow: 0 0 0 3px var(--accent-soft); }
+.proxy-global-input .proxy-check-btn { height: var(--control-md); }
+.mini-ic.proxy-set { color: var(--accent-text); border-color: var(--accent-border); }
 
 .action-feedback { display: grid; gap: 6px; margin: 0 0 13px; }
 .action-status { min-width: 0; display: flex; align-items: flex-start; gap: 9px; padding: 8px 10px; border: 1px solid var(--border); border-left-width: 3px; border-radius: var(--r-sm); background: var(--bg-soft); }

@@ -45,13 +45,13 @@ fn probe_urls(base_url: &str) -> Vec<String> {
 /// 为什么不用纯 TCP connect：`connect()` 会被本机 TUN / 透明代理（Clash fake-ip 之类）
 /// 就地应答，握手在微秒级完成，量出 <1ms 的假象——那根本没到真实端点。HTTP 请求
 /// 必须被代理转发到上游、等真实响应回来，故能量到真实链路延迟。
-pub async fn latency(base_url: &str) -> Result<f64, String> {
+pub async fn latency(base_url: &str, proxy: Option<&str>) -> Result<f64, String> {
     let urls = probe_urls(base_url);
     if urls.is_empty() {
         return Err("请先填写 Base URL".into());
     }
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
+    let builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(10));
+    let client = crate::netproxy::apply_to_builder(builder, proxy)?
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -78,13 +78,13 @@ pub async fn latency(base_url: &str) -> Result<f64, String> {
 /// - 401/403 → unauthorized（地址对、key 不对）
 /// - 其它收到的响应码 → ok（地址可达；4xx/5xx 多为端点差异，不代表不通）
 /// - 全部候选都请求失败 → unreachable
-pub async fn test(base_url: &str, api_key: &str) -> Result<ConnResult, String> {
+pub async fn test(base_url: &str, api_key: &str, proxy: Option<&str>) -> Result<ConnResult, String> {
     let urls = probe_urls(base_url);
     if urls.is_empty() {
         return Err("请先填写 Base URL".into());
     }
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
+    let builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(10));
+    let client = crate::netproxy::apply_to_builder(builder, proxy)?
         .build()
         .map_err(|e| e.to_string())?;
 

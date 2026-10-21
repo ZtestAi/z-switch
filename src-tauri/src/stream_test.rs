@@ -363,6 +363,7 @@ pub async fn run(
     wire_api: &str,
     api_key_field: Option<&str>,
     simulate_cli: bool,
+    proxy: Option<&str>,
     on_event: Channel<StreamTestEvent>,
 ) -> Result<StreamTestResult, String> {
     if api_key.trim().is_empty() {
@@ -372,9 +373,10 @@ pub async fn run(
         return Err("请先选择或填写模型".into());
     }
     let url = endpoint(base_url, app, wire_api)?;
-    let client = reqwest::Client::builder()
+    let builder = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(8))
-        .timeout(Duration::from_secs(60))
+        .timeout(Duration::from_secs(60));
+    let client = crate::netproxy::apply_to_builder(builder, proxy)?
         .build()
         .map_err(|error| format!("创建测试客户端失败：{error}"))?;
 
@@ -565,6 +567,7 @@ mod tests {
                 "chat",
                 None,
                 false,
+                None,
                 channel,
             )
             .await
@@ -629,10 +632,10 @@ mod tests {
 
             let base = format!("http://{address}");
             let noop = || Channel::new(|_| Ok(()));
-            let plain = run("claude", &base, "k", "m", "chat", None, false, noop()).await;
+            let plain = run("claude", &base, "k", "m", "chat", None, false, None, noop()).await;
             assert!(plain.err().is_some_and(|error| error.contains("HTTP 403")));
 
-            let simulated = run("claude", &base, "k", "m", "chat", None, true, noop())
+            let simulated = run("claude", &base, "k", "m", "chat", None, true, None, noop())
                 .await
                 .unwrap();
             assert_eq!(simulated.text, "OK");

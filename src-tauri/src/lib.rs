@@ -6,6 +6,7 @@ mod config;
 mod connectivity;
 mod live;
 mod model_fetch;
+mod netproxy;
 mod official;
 mod original;
 mod proxy;
@@ -99,6 +100,8 @@ pub(crate) fn switch_in_place(
         .get("applyClaudeDesktop")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let settings = root.settings.clone();
+    let managed = netproxy::managed_urls(app, root);
     let data = root
         .apps
         .get_mut(app)
@@ -109,6 +112,7 @@ pub(crate) fn switch_in_place(
 
     let proxy_on = proxy_handle.map(|h| h.is_routed(app)).unwrap_or(false);
     let target = data.providers.get(id).cloned().unwrap();
+    let target_proxy = netproxy::effective(app, &settings, &target);
     let target_is_official = store::is_official_provider(&target);
     let current_id = data.current.clone();
     let current_is_official = current_id
@@ -120,10 +124,10 @@ pub(crate) fn switch_in_place(
         let handle = proxy_handle.expect("running proxy must have a handle");
         if target_is_official {
             // 官方账号始终保持客户端直连；另一个应用仍可继续使用本地代理。
-            live::write_live(app, &target, backup)?;
+            live::write_live(app, &target, backup, target_proxy.as_deref())?;
             proxy::clear_target(&handle.targets, app);
         } else {
-            let runtime_target = proxy::target_from_provider(app, &target)
+            let runtime_target = proxy::target_from_provider(app, &target, target_proxy)
                 .ok_or_else(|| format!("供应商 {} 缺少可转发的 Base URL", target.name))?;
 
             // 从官方直连、或“无当前供应商”（如刚恢复过 Codex，current=None、
@@ -134,13 +138,14 @@ pub(crate) fn switch_in_place(
                 if let Some(current) = current_id.as_ref() {
                     if current != id {
                         if let Some(old) = data.providers.get_mut(current) {
-                            live::backfill(app, old);
+                            live::backfill(app, old, &managed);
                         }
                     }
                 }
                 proxy::set_target(&handle.targets, app, runtime_target);
                 let proxied = proxy::proxied_provider(app, &target, handle.current_port());
-                if let Err(error) = live::write_live(app, &proxied, backup) {
+                // 客户端只连本机路由，网络代理由路由转发上游时使用，live 不注入。
+                if let Err(error) = live::write_live(app, &proxied, backup, None) {
                     proxy::clear_target(&handle.targets, app);
                     return Err(error);
                 }
@@ -165,11 +170,11 @@ pub(crate) fn switch_in_place(
     if let Some(cur) = data.current.clone() {
         if cur != id {
             if let Some(old) = data.providers.get_mut(&cur) {
-                live::backfill(app, old);
+                live::backfill(app, old, &managed);
             }
         }
     }
-    live::write_live(app, &target, backup)?;
+    live::write_live(app, &target, backup, target_proxy.as_deref())?;
     data.current = Some(id.to_string());
     sync_claude_plugin_after_switch(plugin_on, app, target_is_official);
     sync_claude_desktop_after_switch(desktop_on, app, target_is_official, Some(&target), proxy_handle);
@@ -195,6 +200,8 @@ fn save_provider(
     if app == "codex" {
         store::migrate_codex_provider_wire_api(&mut provider);
     }
+    netproxy::normalize_provider(&app, &mut provider)?;
+    let provider_proxy = netproxy::effective(&app, &root.settings, &provider);
     let data = root.apps.entry(app.clone()).or_default();
     let id = provider.id.clone();
     if id.trim().is_empty() {
@@ -212,11 +219,11 @@ fn save_provider(
         let handle = app_handle.state::<proxy::ProxyHandle>();
         if handle.is_routed(&app) {
             // 代理模式：更新内存 target（live 保持 localhost，不覆盖）
-            if let Some(t) = proxy::target_from_provider(&app, &provider) {
+            if let Some(t) = proxy::target_from_provider(&app, &provider, provider_proxy) {
                 proxy::set_target(&handle.targets, &app, t);
             }
         } else {
-            live::write_live(&app, &provider, backup)?;
+            live::write_live(&app, &provider, backup, provider_proxy.as_deref())?;
         }
     }
     persist(&root)?;
@@ -257,7 +264,8 @@ fn delete_provider(
                     let provider = current_provider
                         .as_ref()
                         .ok_or_else(|| "当前供应商不存在".to_string())?;
-                    live::write_live(&app, provider, backup_flag(&root))?;
+                    let provider_proxy = netproxy::effective(&app, &root.settings, provider);
+                    live::write_live(&app, provider, backup_flag(&root), provider_proxy.as_deref())?;
                 }
             }
             Some("restore") => original::restore_app(&app)?,
@@ -291,6 +299,55 @@ fn delete_provider(
         sync_claude_plugin_after_switch(plugin_on, &app, true);
         sync_claude_desktop_after_switch(desktop_on, &app, true, None, Some(handle.inner()));
     }
+    let out = root.clone();
+    drop(root);
+    tray::refresh(&app_handle);
+    Ok(out)
+}
+
+/// 批量移除供应商（纯数据操作，供命令与测试复用）。先整体校验再删除：
+/// 任一 id 为官方卡片、当前正在使用或不存在，整批拒绝，不做部分删除。
+fn remove_providers(root: &mut Root, app: &str, ids: &[String]) -> Result<(), String> {
+    if ids.is_empty() {
+        return Err("未选择要删除的供应商".into());
+    }
+    let data = root
+        .apps
+        .get_mut(app)
+        .ok_or_else(|| format!("未知应用: {app}"))?;
+    for id in ids {
+        let provider = data
+            .providers
+            .get(id)
+            .ok_or_else(|| format!("供应商不存在: {id}"))?;
+        if store::is_official_provider(provider) {
+            return Err("官方账号是系统卡片，不能删除".into());
+        }
+        if data.current.as_deref() == Some(id.as_str()) {
+            return Err(format!("「{}」正在使用，请单独删除", provider.name));
+        }
+    }
+    for id in ids {
+        data.providers.remove(id);
+    }
+    data.order.retain(|x| !ids.contains(x));
+    Ok(())
+}
+
+/// 批量删除供应商（不含官方卡片与当前正在使用的供应商，二者需单独处理）。
+/// 不触碰任何 live 配置，只改 providers.json；落盘成功后才替换内存状态。
+#[tauri::command]
+fn delete_providers(
+    app_handle: AppHandle,
+    state: State<AppState>,
+    app: String,
+    ids: Vec<String>,
+) -> Result<Root, String> {
+    let mut root = state.0.lock().unwrap();
+    let mut next = root.clone();
+    remove_providers(&mut next, &app, &ids)?;
+    persist(&next)?;
+    *root = next;
     let out = root.clone();
     drop(root);
     tray::refresh(&app_handle);
@@ -462,11 +519,16 @@ fn restore_official_baseline(
         .ok_or_else(|| format!("未知应用: {app}"))?
         .to_string();
 
-    let backup = {
+    let (backup, official_proxy, managed) = {
         let root = state.0.lock().unwrap();
-        backup_flag(&root)
+        let official_proxy = root
+            .apps
+            .get(&app)
+            .and_then(|data| data.providers.get(&official_id))
+            .and_then(|provider| netproxy::effective(&app, &root.settings, provider));
+        (backup_flag(&root), official_proxy, netproxy::managed_urls(&app, &root))
     };
-    live::write_official_baseline(&app, backup)?;
+    live::write_official_baseline(&app, backup, official_proxy.as_deref(), &managed)?;
 
     // 关掉路由并清代理目标，避免下次启动又把 live 指回 localhost。
     handle.set_routed(&app, false);
@@ -639,18 +701,22 @@ async fn set_app_routing(
     }
     let handle = app_handle.state::<proxy::ProxyHandle>();
     // 取数据（不跨 await 持锁）。
-    let (backup, port, runtime_config, current, desktop_on) = {
+    let (backup, port, runtime_config, current, current_proxy, desktop_on) = {
         let root = state.0.lock().unwrap();
         let current = root
             .apps
             .get(&app)
             .and_then(|data| data.current.as_ref().and_then(|id| data.providers.get(id)))
             .cloned();
+        let current_proxy = current
+            .as_ref()
+            .and_then(|provider| netproxy::effective(&app, &root.settings, provider));
         (
             backup_flag(&root),
             proxy_port(&root),
             proxy::ProxyRuntimeConfig::from_settings(&root.settings),
             current,
+            current_proxy,
             root.settings
                 .get("applyClaudeDesktop")
                 .and_then(|v| v.as_bool())
@@ -668,18 +734,20 @@ async fn set_app_routing(
         if let Some(provider) = &current {
             if store::is_official_provider(provider) {
                 proxy::clear_target(&handle.targets, &app);
-                live::write_live(&app, provider, backup)?;
-            } else if let Some(target) = proxy::target_from_provider(&app, provider) {
+                live::write_live(&app, provider, backup, current_proxy.as_deref())?;
+            } else if let Some(target) =
+                proxy::target_from_provider(&app, provider, current_proxy.clone())
+            {
                 proxy::set_target(&handle.targets, &app, target);
                 let proxied = proxy::proxied_provider(&app, provider, port);
-                live::write_live(&app, &proxied, backup)?;
+                live::write_live(&app, &proxied, backup, None)?;
             }
         }
     } else {
         handle.set_routed(&app, false);
         if let Some(provider) = &current {
             if !store::is_official_provider(provider) {
-                live::write_live(&app, provider, backup)?;
+                live::write_live(&app, provider, backup, current_proxy.as_deref())?;
             }
         }
         proxy::clear_target(&handle.targets, &app);
@@ -732,29 +800,206 @@ fn reorder_providers(
     Ok(out)
 }
 
-/// 导入整份配置（覆盖）
+/// 导入结果：新配置 + 保留本机版本的中转站 + 改用导入版本并已写入客户端配置的中转站 + 非致命警告。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportOutcome {
+    root: Root,
+    kept: Vec<String>,
+    applied: Vec<String>,
+    warning: Option<String>,
+}
+
+/// 导入预览：列出本机正在使用、且导入文件里同 id 内容不同的卡片，供用户选择保留哪个版本。
+#[tauri::command]
+fn preview_import(state: State<AppState>, mut root_in: Root) -> Vec<store::ImportConflict> {
+    root_in.ensure_official_providers();
+    let root = state.0.lock().unwrap();
+    root_in.import_conflicts(&root)
+}
+
+/// 导入整份配置（覆盖供应商列表与设置）。本机正在使用的卡片与本机状态相关的设置保持不变
+/// （见 `Root::align_import_with_local`）；`use_imported` 中的冲突改用导入版本，
+/// 并立即写入客户端配置，保证当前项与 live 一致。写入失败则该客户端回退为保留本机版本。
 #[tauri::command]
 fn import_config(
     app_handle: AppHandle,
     state: State<AppState>,
     mut root_in: Root,
-) -> Result<Root, String> {
+    use_imported: Option<Vec<store::ImportChoice>>,
+) -> Result<ImportOutcome, String> {
     root_in.ensure_official_providers();
     let mut root = state.0.lock().unwrap();
+    let alignment = root_in.align_import_with_local(&root, &use_imported.unwrap_or_default());
+    let mut kept = alignment.kept;
+    let mut applied = Vec::new();
+    let mut errors = Vec::new();
+    for adoption in &alignment.adopted {
+        let data = &root_in.apps[&adoption.app];
+        let provider = data.providers[data.current.as_ref().unwrap()].clone();
+        match write_current_live(&app_handle, &root_in, &adoption.app, &provider) {
+            Ok(()) => applied.push(provider.name),
+            Err(error) => {
+                errors.push(format!(
+                    "{} 未能写入客户端配置，已保留本机版本（{error}）",
+                    provider.name
+                ));
+                kept.extend(root_in.revert_adoption(adoption, &root));
+            }
+        }
+    }
+    kept.sort();
     *root = root_in;
     persist(&root)?;
     let out = root.clone();
     drop(root);
     tray::refresh(&app_handle);
-    Ok(out)
+    Ok(ImportOutcome {
+        root: out,
+        kept,
+        applied,
+        warning: (!errors.is_empty()).then(|| errors.join("；")),
+    })
 }
 
-/// 保存全局设置
+/// 把导入时改用的版本写入客户端配置：路由中只更新路由上游，否则写 live。
+fn write_current_live(
+    app_handle: &AppHandle,
+    root: &Root,
+    app: &str,
+    provider: &Provider,
+) -> Result<(), String> {
+    let provider_proxy = netproxy::effective(app, &root.settings, provider);
+    let handle = app_handle.state::<proxy::ProxyHandle>();
+    if handle.is_routed(app) {
+        let target = proxy::target_from_provider(app, provider, provider_proxy)
+            .ok_or_else(|| format!("供应商 {} 缺少可转发的 Base URL", provider.name))?;
+        proxy::set_target(&handle.targets, app, target);
+    } else {
+        live::write_live(app, provider, backup_flag(root), provider_proxy.as_deref())?;
+    }
+    let desktop_on = root
+        .settings
+        .get("applyClaudeDesktop")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    sync_claude_desktop_after_switch(desktop_on, app, false, Some(provider), Some(handle.inner()));
+    Ok(())
+}
+
+/// 保存全局设置。全局网络代理变更时，让 Claude / Codex 当前供应商就地使用新代理。
 #[tauri::command]
-fn save_settings(state: State<AppState>, settings: serde_json::Value) -> Result<Root, String> {
+fn save_settings(
+    app_handle: AppHandle,
+    state: State<AppState>,
+    mut settings: serde_json::Value,
+) -> Result<Root, String> {
+    if let Some(raw) = settings.get("networkProxy").and_then(|v| v.as_str()) {
+        let normalized = if raw.trim().is_empty() {
+            String::new()
+        } else {
+            netproxy::validate(raw).map_err(|e| format!("全局网络代理：{e}"))?
+        };
+        settings["networkProxy"] = serde_json::Value::String(normalized);
+    }
     let mut root = state.0.lock().unwrap();
+    let proxy_changed =
+        netproxy::global_proxy(&root.settings) != netproxy::global_proxy(&settings);
+    let previous: Vec<(&str, Vec<String>)> = proxy::PROXY_APPS
+        .iter()
+        .map(|app| (*app, netproxy::managed_urls(app, &root)))
+        .collect();
     root.settings = settings;
     persist(&root)?;
+    if proxy_changed {
+        let mut errors = Vec::new();
+        for (app, managed) in &previous {
+            if let Err(error) = reapply_network_proxy(&app_handle, &root, app, managed) {
+                errors.push(format!("{app}：{error}"));
+            }
+        }
+        if !errors.is_empty() {
+            return Err(format!(
+                "设置已保存，但网络代理未能写入当前配置（{}）",
+                errors.join("；")
+            ));
+        }
+    }
+    Ok(root.clone())
+}
+
+/// 网络代理设置变化后，让该客户端当前生效的供应商就地使用新代理：
+/// 路由中的中转站只换路由 target；其余直连情形只改写 live 里的代理字段。
+/// `previous` 为变更前 z-switch 可能注入过的代理地址，用于清掉旧值。
+fn reapply_network_proxy(
+    app_handle: &AppHandle,
+    root: &Root,
+    app: &str,
+    previous: &[String],
+) -> Result<(), String> {
+    let Some(data) = root.apps.get(app) else {
+        return Ok(());
+    };
+    let Some(provider) = data.current.as_ref().and_then(|id| data.providers.get(id)) else {
+        return Ok(());
+    };
+    let provider_proxy = netproxy::effective(app, &root.settings, provider);
+    let handle = app_handle.state::<proxy::ProxyHandle>();
+    if handle.is_routed(app) && !store::is_official_provider(provider) {
+        if let Some(target) = proxy::target_from_provider(app, provider, provider_proxy) {
+            proxy::set_target(&handle.targets, app, target);
+        }
+        return Ok(());
+    }
+    let mut managed = netproxy::managed_urls(app, root);
+    managed.extend(previous.iter().cloned());
+    live::apply_proxy_live(app, &managed, provider_proxy.as_deref(), backup_flag(root))
+}
+
+/// 单独设置某张卡片的网络代理（含官方账号卡片）：
+/// `proxy` 为 null / `{mode:"global"}` 跟随全局、`{mode:"custom",url}` 自定义、`{mode:"off"}` 不使用。
+/// 若该卡片正在使用，立即生效。
+#[tauri::command]
+fn set_provider_proxy(
+    app_handle: AppHandle,
+    state: State<AppState>,
+    app: String,
+    id: String,
+    proxy: Option<serde_json::Value>,
+) -> Result<Root, String> {
+    if !netproxy::supports(&app) {
+        return Err(format!("{app} 暂不支持网络代理"));
+    }
+    let normalized = netproxy::normalize_setting(proxy.as_ref())?;
+    let mut root = state.0.lock().unwrap();
+    let previous = netproxy::managed_urls(&app, &root);
+    let mut next = root.clone();
+    let data = next
+        .apps
+        .get_mut(&app)
+        .ok_or_else(|| format!("未知应用: {app}"))?;
+    let provider = data
+        .providers
+        .get_mut(&id)
+        .ok_or_else(|| format!("供应商不存在: {id}"))?;
+    if !provider.meta.is_object() {
+        provider.meta = serde_json::json!({});
+    }
+    let meta = provider.meta.as_object_mut().unwrap();
+    match normalized {
+        Some(value) => {
+            meta.insert("proxy".into(), value);
+        }
+        None => {
+            meta.remove("proxy");
+        }
+    }
+    let is_current = data.current.as_deref() == Some(id.as_str());
+    if is_current {
+        reapply_network_proxy(&app_handle, &next, &app, &previous)?;
+    }
+    persist(&next)?;
+    *root = next;
     Ok(root.clone())
 }
 
@@ -828,9 +1073,10 @@ fn export_json(state: State<AppState>) -> Result<String, String> {
 
 /// 端点测速（HTTP 层往返毫秒，保留亚毫秒精度）。
 /// 走 HTTP 而非纯 TCP，避免本机 TUN/透明代理就地应答导致的 <1ms 失真。
+/// `proxy` 为该供应商生效的网络代理，测速路径与客户端实际请求一致。
 #[tauri::command]
-async fn speedtest(url: String) -> Result<f64, String> {
-    connectivity::latency(&url).await
+async fn speedtest(url: String, proxy: Option<String>) -> Result<f64, String> {
+    connectivity::latency(&url, proxy.as_deref()).await
 }
 
 /// 拉取供应商可用模型列表
@@ -839,8 +1085,9 @@ async fn fetch_models(
     base_url: String,
     api_key: String,
     models_url: Option<String>,
+    proxy: Option<String>,
 ) -> Result<Vec<String>, String> {
-    model_fetch::fetch_models(&base_url, &api_key, models_url.as_deref()).await
+    model_fetch::fetch_models(&base_url, &api_key, models_url.as_deref(), proxy.as_deref()).await
 }
 
 /// 连通性测试：探测地址通不通 / key 对不对
@@ -848,8 +1095,9 @@ async fn fetch_models(
 async fn test_connectivity(
     base_url: String,
     api_key: String,
+    proxy: Option<String>,
 ) -> Result<connectivity::ConnResult, String> {
-    connectivity::test(&base_url, &api_key).await
+    connectivity::test(&base_url, &api_key, proxy.as_deref()).await
 }
 
 /// 使用编辑页当前配置发送一条真实的最小流式模型请求。
@@ -863,6 +1111,7 @@ async fn test_stream(
     wire_api: String,
     api_key_field: Option<String>,
     simulate_cli: Option<bool>,
+    proxy: Option<String>,
     on_event: tauri::ipc::Channel<stream_test::StreamTestEvent>,
 ) -> Result<stream_test::StreamTestResult, String> {
     stream_test::run(
@@ -873,9 +1122,16 @@ async fn test_stream(
         &wire_api,
         api_key_field.as_deref(),
         simulate_cli.unwrap_or(false),
+        proxy.as_deref(),
         on_event,
     )
     .await
+}
+
+/// 检测网络代理是否可连接（只做 TCP 握手），返回耗时毫秒。
+#[tauri::command]
+async fn check_network_proxy(url: String) -> Result<f64, String> {
+    netproxy::check(&url).await
 }
 
 /// 设置开机自启（同步到系统 + 持久化 settings.autoLaunch）
@@ -918,7 +1174,7 @@ fn import_live(app_handle: AppHandle, state: State<AppState>) -> Result<Root, St
 fn import_live_in_place(root: &mut Root) -> bool {
     let mut touched = false;
     // claude
-    if let Some(mut p) = live::import_claude() {
+    if let Some(mut p) = live::import_claude(&netproxy::managed_urls("claude", root)) {
         let data = root.apps.entry("claude".into()).or_default();
         let id = unique_id(&data.providers, "imported-current");
         p.id = id.clone();
@@ -1149,7 +1405,10 @@ fn environment_repair(
         .get(&app)
         .and_then(|d| d.current.as_ref().and_then(|id| d.providers.get(id)).cloned());
     match current {
-        Some(provider) => live::write_live(&app, &provider, backup)?,
+        Some(provider) => {
+            let provider_proxy = netproxy::effective(&app, &root.settings, &provider);
+            live::write_live(&app, &provider, backup, provider_proxy.as_deref())?
+        }
         None => original::restore_app(&app)?,
     }
     // 同时清掉运行期路由标记，避免修复后自检面板仍显示「本地路由中」。
@@ -1211,7 +1470,8 @@ pub fn run() {
                 .and_then(|data| data.current.as_ref().and_then(|id| data.providers.get(id)))
                 .cloned();
             if let Some(provider) = provider {
-                if let Err(error) = live::write_live(app, &provider, false) {
+                // 不注入网络代理：原始快照应反映用户自己的配置。
+                if let Err(error) = live::write_live(app, &provider, false, None) {
                     eprintln!("[z-switch] 建立原始快照前恢复 {app} 真实配置失败：{error}");
                 }
             }
@@ -1288,13 +1548,24 @@ pub fn run() {
 
     // 官方卡片只保存去除中转字段后的公共配置；OAuth/API Key 不会进入卡片。
     for app in ["claude", "codex"] {
+        let managed = netproxy::managed_urls(app, &root);
         if let Some(id) = store::official_provider_id(app) {
             if let Some(provider) = root
                 .apps
                 .get_mut(app)
                 .and_then(|data| data.providers.get_mut(id))
             {
-                root_changed |= live::hydrate_official_provider(app, provider);
+                root_changed |= live::hydrate_official_provider(app, provider, &managed);
+            }
+        }
+    }
+    // 清理测试版本可能收进 Claude 卡片的注入代理（值命中 z-switch 管理的代理地址），
+    // 否则卡片 env 里残留的代理会让「不使用」/ 清空全局代理失效。
+    let managed = netproxy::managed_urls("claude", &root);
+    if let Some(data) = root.apps.get_mut("claude") {
+        for provider in data.providers.values_mut() {
+            if let Some(env) = provider.settings_config.get_mut("env") {
+                root_changed |= netproxy::strip_claude_env(env, &managed);
             }
         }
     }
@@ -1310,7 +1581,8 @@ pub fn run() {
                 .filter(|provider| store::is_official_provider(provider))
                 .cloned();
             if let Some(provider) = current_official {
-                if let Err(error) = live::write_live(app, &provider, false) {
+                let provider_proxy = netproxy::effective(app, &root.settings, &provider);
+                if let Err(error) = live::write_live(app, &provider, false, provider_proxy.as_deref()) {
                     eprintln!("[z-switch] 初始化 {app} 官方账号配置失败：{error}");
                 }
             }
@@ -1348,11 +1620,15 @@ pub fn run() {
             get_config,
             save_provider,
             delete_provider,
+            delete_providers,
             switch_provider,
             reorder_providers,
+            preview_import,
             import_config,
             export_json,
             save_settings,
+            set_provider_proxy,
+            check_network_proxy,
             speedtest,
             fetch_models,
             import_live,
@@ -1412,12 +1688,13 @@ pub fn run() {
                     .filter(|a| app_routing_enabled(&root, a))
                     .map(|a| a.to_string())
                     .collect();
-                let mut cur: Vec<(String, Provider)> = Vec::new();
+                let mut cur: Vec<(String, Provider, Option<String>)> = Vec::new();
                 for a in proxy::PROXY_APPS.iter().copied() {
                     if let Some(d) = root.apps.get(a) {
                         if let Some(id) = &d.current {
                             if let Some(p) = d.providers.get(id) {
-                                cur.push((a.to_string(), p.clone()));
+                                let p_proxy = netproxy::effective(a, &root.settings, p);
+                                cur.push((a.to_string(), p.clone(), p_proxy));
                             }
                         }
                     }
@@ -1442,7 +1719,7 @@ pub fn run() {
                     for app in &routed_apps {
                         ph.set_routed(app, true);
                     }
-                    for (app, provider) in &currents {
+                    for (app, provider, provider_proxy) in &currents {
                         if !routed_apps.contains(app) {
                             continue;
                         }
@@ -1450,11 +1727,13 @@ pub fn run() {
                             proxy::clear_target(&ph.targets, app);
                             continue;
                         }
-                        if let Some(t) = proxy::target_from_provider(app, provider) {
+                        if let Some(t) =
+                            proxy::target_from_provider(app, provider, provider_proxy.clone())
+                        {
                             proxy::set_target(&ph.targets, app, t);
                         }
                         let proxied = proxy::proxied_provider(app, provider, port);
-                        if let Err(error) = live::write_live(app, &proxied, false) {
+                        if let Err(error) = live::write_live(app, &proxied, false, None) {
                             eprintln!("[z-switch] 自动恢复代理地址失败：{error}");
                         }
                     }
@@ -1464,4 +1743,63 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running z-switch");
+}
+
+#[cfg(test)]
+mod batch_delete_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn relay(id: &str) -> Provider {
+        Provider {
+            id: id.into(),
+            name: id.to_uppercase(),
+            category: Some("custom".into()),
+            settings_config: json!({ "env": {} }),
+            meta: json!({}),
+            failover: json!({}),
+        }
+    }
+
+    fn seeded() -> Root {
+        let mut root = Root::default_seeded();
+        let data = root.apps.get_mut("claude").unwrap();
+        for id in ["a", "b", "c"] {
+            data.providers.insert(id.into(), relay(id));
+            data.order.push(id.into());
+        }
+        data.current = Some("c".into());
+        root
+    }
+
+    fn ids(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn removes_selected_providers_and_order() {
+        let mut root = seeded();
+        remove_providers(&mut root, "claude", &ids(&["a", "b"])).unwrap();
+        let data = &root.apps["claude"];
+        assert!(!data.providers.contains_key("a") && !data.providers.contains_key("b"));
+        assert_eq!(data.order, ids(&[store::CLAUDE_OFFICIAL_PROVIDER_ID, "c"]));
+        assert_eq!(data.current.as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn rejects_whole_batch_for_current_official_or_unknown() {
+        for bad in [
+            ids(&["a", "c"]),
+            ids(&["a", store::CLAUDE_OFFICIAL_PROVIDER_ID]),
+            ids(&["a", "missing"]),
+            ids(&[]),
+        ] {
+            let mut root = seeded();
+            assert!(remove_providers(&mut root, "claude", &bad).is_err());
+            // 整批拒绝：已校验通过的 "a" 也不能被删掉。
+            assert!(root.apps["claude"].providers.contains_key("a"));
+        }
+        let mut root = seeded();
+        assert!(remove_providers(&mut root, "nope", &ids(&["a"])).is_err());
+    }
 }

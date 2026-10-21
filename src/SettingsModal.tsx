@@ -14,6 +14,8 @@ import {
   setAppRouting,
   environmentDiagnose,
   environmentRepair,
+  getConfig,
+  saveSettings,
   type OriginalConfigStatus,
   type EnvDiagnosis,
 } from "./api";
@@ -21,6 +23,7 @@ import type { AppType, Root } from "./types";
 import type { Update } from "./updater";
 import { getVersion } from "@tauri-apps/api/app";
 import { ChevronDownIcon, ChevronRightIcon, ClockIcon, CloseIcon, CopyIcon, DownloadIcon, FolderIcon, LinkIcon, TrashIcon, UploadIcon } from "./Icons";
+import { globalProxyOf, PROXY_PLACEHOLDER, ProxyCheckButton, ProxyCheckResult, useProxyCheck, validateProxyUrl } from "./NetworkProxy";
 
 type SettingsTab = "general" | "integration" | "recover" | "about";
 
@@ -50,6 +53,8 @@ interface Props {
   onOpenExport?: () => void;
   onOpenCcswitch?: () => void;
   onRepaired?: (root: Root) => void;
+  /** 外部整体替换了设置（如导入配置）时递增，用于重新同步本页的设置副本 */
+  settingsEpoch?: number;
 }
 
 function EnvRepairSection({
@@ -128,6 +133,103 @@ function EnvRepairSection({
   );
 }
 
+/** 全局默认网络代理：Claude Code / Codex 共用，供应商单独设置优先 */
+function NetworkProxySection({
+  value,
+  onSave,
+}: {
+  value: string;
+  onSave: (value: string) => Promise<void>;
+}) {
+  const [draft, setDraft] = useState(value);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const { state, check, reset } = useProxyCheck();
+  const dirty = draft.trim() !== value;
+
+  // 外部更新（如导入配置）后同步输入框。
+  useEffect(() => {
+    setDraft(value);
+    setError(null);
+  }, [value]);
+
+  function change(next: string) {
+    setDraft(next);
+    setError(null);
+    reset();
+  }
+
+  async function save(raw: string) {
+    let next = "";
+    if (raw.trim()) {
+      const result = validateProxyUrl(raw);
+      if ("error" in result) {
+        setError(result.error);
+        return;
+      }
+      next = result.url;
+    }
+    setSaving(true);
+    try {
+      await onSave(next);
+      setDraft(next);
+      setError(null);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function runCheck() {
+    const result = validateProxyUrl(draft);
+    if ("error" in result) {
+      setError(result.error);
+      return;
+    }
+    check(result.url);
+  }
+
+  return (
+    <div className="set-group">
+      <h4>网络代理</h4>
+      <div className="set-row proxy-global-row">
+        <div className="set-copy">
+          <div className="l">全局默认代理</div>
+          <div className="d">
+            Claude Code / Codex 访问官方账号或中转站时使用的 HTTP 代理（如 Clash 的混合端口）。
+            供应商卡片可单独设置，优先于此处；Grok 暂不支持。修改后重启客户端生效。
+          </div>
+        </div>
+        <div className="proxy-global-input">
+          <input
+            className="mono"
+            value={draft}
+            onChange={(event) => change(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && dirty && !saving) void save(draft);
+            }}
+            placeholder={`留空 = 不使用，例如 ${PROXY_PLACEHOLDER}`}
+            spellCheck={false}
+            autoComplete="off"
+            aria-label="全局默认代理地址"
+          />
+          {draft.trim() && <ProxyCheckButton state={state} onClick={runCheck} />}
+          {dirty ? (
+            <button type="button" className="btn accent" disabled={saving} onClick={() => save(draft)}>
+              {saving ? "保存中…" : "保存"}
+            </button>
+          ) : value ? (
+            <button type="button" className="btn" disabled={saving} onClick={() => save("")}>清除</button>
+          ) : null}
+        </div>
+        {error && <div className="hint inline-hint proxy-check-fail">{error}</div>}
+        <ProxyCheckResult state={state} />
+      </div>
+    </div>
+  );
+}
+
 export default function SettingsModal({
   settings,
   originalStatus,
@@ -146,6 +248,7 @@ export default function SettingsModal({
   onOpenExport,
   onOpenCcswitch,
   onRepaired,
+  settingsEpoch,
 }: Props) {
   const [version, setVersion] = useState("");
   const [checkingUpdate, setCheckingUpdate] = useState(false);
@@ -168,6 +271,10 @@ export default function SettingsModal({
     }
   }
   const [s, setS] = useState<Record<string, any>>({ ...settings });
+  // 导入配置会整体替换设置：重新同步副本，避免之后的修改把旧设置整份写回、冲掉导入结果。
+  useEffect(() => {
+    if (settingsEpoch) setS({ ...settings });
+  }, [settingsEpoch]);
   const [routed, setRouted] = useState<{ claude: boolean; codex: boolean }>({ claude: false, codex: false });
   const [proxyPort, setProxyPort] = useState(8899);
   const [proxyBusy, setProxyBusy] = useState<AppType | null>(null);
@@ -191,6 +298,26 @@ export default function SettingsModal({
     const next = { ...s, [key]: value };
     setS(next);
     onSave(next);
+  }
+
+  // 全局网络代理需等待后端结果：保存后会重写各客户端当前配置，失败要在输入框旁提示。
+  async function saveNetworkProxy(value: string) {
+    const next = { ...s, networkProxy: value };
+    try {
+      const root = await saveSettings(next);
+      setS(next);
+      onRepaired?.(root);
+      onToast?.("success", value ? "已保存全局网络代理 · 重启客户端后生效" : "已清除全局网络代理 · 重启客户端后生效");
+    } catch (e) {
+      // 设置可能已保存、仅写入客户端配置失败：重新同步真实状态。
+      getConfig()
+        .then((root) => {
+          setS({ ...(root.settings ?? {}) });
+          onRepaired?.(root);
+        })
+        .catch(() => {});
+      throw e;
+    }
   }
 
   function setReliability(key: string, value: unknown) {
@@ -377,6 +504,8 @@ export default function SettingsModal({
           </div>
         </div>
       </div>
+
+      <NetworkProxySection value={globalProxyOf(s) ?? ""} onSave={saveNetworkProxy} />
 
       <div className="set-group">
         <h4>本地路由 · 热切换</h4>

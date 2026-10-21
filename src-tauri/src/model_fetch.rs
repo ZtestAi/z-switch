@@ -50,13 +50,14 @@ pub async fn fetch_models(
     base_url: &str,
     api_key: &str,
     models_url: Option<&str>,
+    proxy: Option<&str>,
 ) -> Result<Vec<String>, String> {
     let urls = candidates(base_url, models_url);
     if urls.is_empty() {
         return Err("请先填写 Base URL".into());
     }
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(12))
+    let builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(12));
+    let client = crate::netproxy::apply_to_builder(builder, proxy)?
         .build()
         .map_err(|e| e.to_string())?;
 

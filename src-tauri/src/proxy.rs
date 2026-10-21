@@ -131,6 +131,8 @@ pub struct AppTarget {
     pub base_url: String,
     /// 需注入/覆盖的请求头（key），例如 ("authorization","Bearer xxx") 或 ("x-api-key","xxx")
     pub headers: Vec<(String, String)>,
+    /// 转发上游时使用的网络代理（供应商生效值）；None = 沿用默认客户端（系统环境）。
+    pub proxy: Option<String>,
 }
 
 /// 代理运行期共享状态：claude / codex 各自的当前 target。
@@ -250,6 +252,8 @@ impl ProxyHandle {
 /// 传给 handler 的运行期依赖。
 struct Runtime {
     client: reqwest::Client,
+    /// 按网络代理地址懒建并缓存的客户端（配置同 client，额外挂代理）。
+    proxied_clients: std::sync::Mutex<HashMap<String, reqwest::Client>>,
     targets: SharedTargets,
     config: ProxyRuntimeConfig,
     error_log_lock: tokio::sync::Mutex<()>,
@@ -299,16 +303,12 @@ impl ProxyControl {
             .await
             .map_err(|e| format!("代理端口 {port} 绑定失败（可能被占用）：{e}"))?;
 
-        let client = reqwest::Client::builder()
-            .connect_timeout(config.connect_timeout)
-            .pool_max_idle_per_host(config.pool_max_idle_per_host)
-            .tcp_keepalive(config.tcp_keepalive)
-            .build()
-            .map_err(|e| format!("构建代理 HTTP 客户端失败：{e}"))?;
+        let client = build_client(&config, None)?;
         // 新会话：活跃度计数从 0 起算。
         self.handle.reset_counters();
         let runtime = Arc::new(Runtime {
             client,
+            proxied_clients: std::sync::Mutex::new(HashMap::new()),
             targets: self.handle.targets.clone(),
             config,
             error_log_lock: tokio::sync::Mutex::new(()),
@@ -347,6 +347,31 @@ impl ProxyControl {
     }
 }
 
+/// 构建转发用 HTTP 客户端；`proxy` 为 Some 时所有上游请求经该网络代理。
+fn build_client(config: &ProxyRuntimeConfig, proxy: Option<&str>) -> Result<reqwest::Client, String> {
+    let builder = reqwest::Client::builder()
+        .connect_timeout(config.connect_timeout)
+        .pool_max_idle_per_host(config.pool_max_idle_per_host)
+        .tcp_keepalive(config.tcp_keepalive);
+    crate::netproxy::apply_to_builder(builder, proxy)?
+        .build()
+        .map_err(|e| format!("构建代理 HTTP 客户端失败：{e}"))
+}
+
+/// 取 target 对应的客户端：无网络代理用默认客户端，否则按代理地址复用缓存。
+fn client_for(rt: &Runtime, proxy: Option<&str>) -> Result<reqwest::Client, String> {
+    let Some(proxy) = proxy else {
+        return Ok(rt.client.clone());
+    };
+    let mut cache = rt.proxied_clients.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(client) = cache.get(proxy) {
+        return Ok(client.clone());
+    }
+    let client = build_client(&rt.config, Some(proxy))?;
+    cache.insert(proxy.to_string(), client.clone());
+    Ok(client)
+}
+
 /// 逐跳头（RFC 7230），转发时必须剔除。
 const HOP_BY_HOP: &[&str] = &[
     "connection",
@@ -372,10 +397,12 @@ struct StreamHint {
 }
 
 fn target_secrets(target: &AppTarget) -> Vec<String> {
+    // 网络代理地址可能带用户名密码，同样不得进入错误日志 / 返回给客户端的详情。
     target
         .headers
         .iter()
         .map(|(_, value)| value.clone())
+        .chain(target.proxy.clone())
         .collect()
 }
 
@@ -531,8 +558,9 @@ async fn forward(
         }
     }
 
-    let mut request = rt
-        .client
+    let client = client_for(&rt, target.proxy.as_deref())
+        .map_err(|error| (StatusCode::BAD_GATEWAY, error))?;
+    let mut request = client
         .request(method, &url)
         .headers(fwd)
         .body(body_bytes);
@@ -569,8 +597,16 @@ async fn forward(
     let upstream = match send_result {
         Ok(response) => response,
         Err(error) => {
-            let detail =
-                safe_error_detail(&format!("连接或发送上游请求失败：{error}"), &url, &secrets);
+            let via = if target.proxy.is_some() {
+                "（经网络代理转发，请确认代理可用）"
+            } else {
+                ""
+            };
+            let detail = safe_error_detail(
+                &format!("连接或发送上游请求失败{via}：{error}"),
+                &url,
+                &secrets,
+            );
             write_proxy_error(&rt, &app, None, &url, "request", &detail, &secrets).await;
             return Err((StatusCode::BAD_GATEWAY, detail));
         }
@@ -709,9 +745,13 @@ async fn forward(
 
 // ---------- 从 Provider 推导代理 target ----------
 
-/// 从一个 provider 的 settings_config 推导出「真实上游 + 需注入的鉴权头」。
-/// 返回 None 表示该 provider 无法用于代理（缺 base_url）。
-pub fn target_from_provider(app: &str, provider: &crate::store::Provider) -> Option<AppTarget> {
+/// 从一个 provider 的 settings_config 推导出「真实上游 + 需注入的鉴权头」，
+/// `proxy` 为该供应商生效的网络代理。返回 None 表示该 provider 无法用于代理（缺 base_url）。
+pub fn target_from_provider(
+    app: &str,
+    provider: &crate::store::Provider,
+    proxy: Option<String>,
+) -> Option<AppTarget> {
     match app {
         "claude" => {
             let env = provider.settings_config.get("env")?.as_object()?;
@@ -736,6 +776,7 @@ pub fn target_from_provider(app: &str, provider: &crate::store::Provider) -> Opt
             Some(AppTarget {
                 base_url: base,
                 headers,
+                proxy,
             })
         }
         "codex" => {
@@ -762,6 +803,7 @@ pub fn target_from_provider(app: &str, provider: &crate::store::Provider) -> Opt
             Some(AppTarget {
                 base_url: base,
                 headers,
+                proxy,
             })
         }
         _ => None,
@@ -899,6 +941,7 @@ mod tests {
             AppTarget {
                 base_url: "http://127.0.0.1:9".into(),
                 headers: vec![],
+                proxy: None,
             },
         );
         let mut control = ProxyControl::new(handle);
